@@ -349,7 +349,7 @@ $('btnStyle').onclick = () => { $('styleBox').classList.remove('hidden'); syncSt
 $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {});
+if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
 window.hodland = { local, players, owner, steer, boost, COLS, ROWS, style, room, setRoom, setBots, inviteUrl, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
