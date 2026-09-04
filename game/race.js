@@ -134,7 +134,7 @@ const owner = new Uint8Array(COLS * ROWS);
 const slots = [null]; const slotOf = new Map();
 function slot(pk){ if (slotOf.has(pk)) return slotOf.get(pk); const s = slots.length; slots.push(pk); slotOf.set(pk, s); return s; }
 const players = new Map(); let started = false;
-function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, diedAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0 }; players.set(pk, p); return p; }
+function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0 }; players.set(pk, p); return p; }
 function clearLand(s){ for (let i = 0; i < owner.length; i++) if (owner[i] === s) owner[i] = 0; }
 function spawn(p){
   clearLand(p.slot); p.tail = []; p.tailSet = new Set(); p.alive = true; p.boostUntil = 0;
@@ -187,7 +187,15 @@ function stepPlayer(p, dt){
 function step(dt){
   for (const p of players.values()){
     if (!p.alive){ if ((p === local && started || p.drone) && now() - p.diedAt > RESPAWN_MS) spawn(p); continue; }
-    if (p !== local && !p.drone){ if (now() - p.last > 8000){ clearLand(p.slot); players.delete(p.pk); } continue; }
+    if (p !== local && !p.drone){ if (now() - p.last > 8000){ clearLand(p.slot); players.delete(p.pk); continue; }
+      // Glide toward the last network position, dead-reckoned along the rider's heading so they
+      // keep moving between 6 Hz ticks instead of pausing on each one. Extrapolation is capped at
+      // 350 ms so a stalled sender drifts to a stop instead of sailing through walls.
+      if (p.netAt){ const sp = SPEED * (p.boostUntil > now() ? BOOST : 1); const [ddx, ddy] = DIRS[p.d];
+        const ahead = Math.min((now() - p.netAt) / 1000, .35);
+        const tx = p.netX + ddx * sp * ahead, ty = p.netY + ddy * sp * ahead;
+        const k = Math.min(1, dt * 12); p.x += (tx - p.x) * k; p.y += (ty - p.y) * k; }
+      continue; }
     if (p.drone) driveDrone(p);
     stepPlayer(p, dt);
   }
@@ -246,10 +254,16 @@ function subscribe(){
       if (e.pubkey === me.sessPub) return; let c; try { c = JSON.parse(e.content); } catch { return; }
       const fresh = !players.has(e.pubkey); const p = players.get(e.pubkey) || mkPlayer(e.pubkey); if (!claims.has(e.pubkey)) wantProfile(e.pubkey);
       if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); }
-      if (e.kind === K_TICK){ if (typeof c.x !== 'number') return; p.x = c.x; p.y = c.y; p.d = c.d & 3; p.alive = !!c.a; p.kills = c.k | 0; p.deaths = c.dd | 0; p.boostUntil = c.b ? now() + 300 : 0; p.last = now();
+      if (e.kind === K_TICK){ if (typeof c.x !== 'number') return; p.d = c.d & 3;
+        // Ticks arrive at 6 Hz; the draw loop runs at 60. Snapping x/y here made remote riders
+        // teleport between tick positions. Store the network position and let step() glide toward
+        // it — snap only on first sight, respawn, or a jump too big to be motion (> 4 cells).
+        if (!p.alive && c.a || Math.hypot(c.x - p.x, c.y - p.y) > 4){ p.x = c.x; p.y = c.y; }
+        p.netX = c.x; p.netY = c.y; p.netAt = now();
+        p.alive = !!c.a; p.kills = c.k | 0; p.deaths = c.dd | 0; p.boostUntil = c.b ? now() + 300 : 0; p.last = now();
         if (Array.isArray(c.st)){ p.hue = (c.st[0] | 0) % 360; p.pat = Math.min(PATTERNS.length - 1, c.st[1] | 0); }
         if (Array.isArray(c.tl)){ p.tail = c.tl.filter(n => Number.isInteger(n) && n >= 0 && n < owner.length).slice(-MAX_TAIL); p.tailSet = new Set(p.tail); }
-        if (p.alive && local.alive){ const hc = idx(Math.floor(p.x), Math.floor(p.y)); if (local.tailSet.has(hc)) die(local, p.pk, ''); } }
+        if (p.alive && local.alive){ const hc = idx(Math.floor(c.x), Math.floor(c.y)); if (local.tailSet.has(hc)) die(local, p.pk, ''); } }
       else if (e.kind === K_EVT){ p.last = now();
         if (c.t === 'land' && typeof c.rle === 'string' && c.rle.length < 30000) applyRle(p.slot, c.rle);
         else if (c.t === 'die'){ if (p.alive){ p.alive = false; burst(p.x * CELL, p.y * CELL, colorOf(p, 1), 30); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; feed(kn ? `${kn} wiped out ${nameOf(p.pk)}` : `${nameOf(p.pk)} wiped out`, c.by === me.sessPub ? 'kill me' : 'kill'); } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); if (c.by === me.sessPub) local.kills++; }
