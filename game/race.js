@@ -143,8 +143,57 @@ function spawn(p){
 }
 const local = mkPlayer(me.sessPub); local.hue = style.hue; local.pat = style.pat;
 let drones = [];
+// Drones used to be simulated independently in every browser, so no two riders saw the same ones:
+// same colour slot, different cells, and a kill nobody else witnessed. Now exactly one rider —
+// the live one with the lowest session pubkey — steps them and publishes them like players, and
+// everyone else renders what arrives. Deterministic replay was the other option and does not work
+// here: driveDrone steers off owner[] and the tails, which are reconciled lossily every KEY_MS, so
+// two clients diverge on the first differing cell and never re-converge.
+const AUTH_STALE_MS = 2500;
+const dronePk = i => 'drone' + i + '0000000000000000000000000000000000000000000000000000000000';
+function droneAuthority(){
+  let best = started ? me.sessPub : null;
+  for (const p of players.values()){
+    if (p.drone || p.pk === me.sessPub || now() - p.last > AUTH_STALE_MS) continue;
+    if (!best || p.pk < best) best = p.pk;
+  }
+  return best;
+}
+// Nobody publishing at all (a lobby on your own) still gets drones to look at — they are simply
+// local until someone starts riding. A shorter window than the 8 s peer prune so a rider who
+// closes the tab hands the flock over in a stutter rather than a long freeze.
+const iDrive = () => { const a = droneAuthority(); return a === null || a === me.sessPub; };
+function adoptDrone(i){
+  const pk = dronePk(i);
+  let d = players.get(pk);
+  if (!d){ d = mkPlayer(pk, true); d.name = DRONE_NAMES[i % DRONE_NAMES.length]; d.hue = (i * 67 + 200) % 360; d.pat = i % PATTERNS.length; d.plan = []; d.i = i; }
+  return d;
+}
+// Applied only from the current authority: two clients that briefly disagree about who is in
+// charge would otherwise both drive and the flock would jitter between two simulations.
+function applyFlock(list){
+  const seen = new Set();
+  for (const row of list){
+    if (!Array.isArray(row) || typeof row[1] !== 'number' || typeof row[2] !== 'number') continue;
+    const i = row[0] | 0; if (i < 0 || i >= MAX_BOTS) continue;
+    seen.add(i);
+    const d = adoptDrone(i);
+    if (!d.alive && row[4] || Math.hypot(row[1] - d.x, row[2] - d.y) > 4){ d.x = row[1]; d.y = row[2]; }
+    d.netX = row[1]; d.netY = row[2]; d.netAt = now(); d.d = row[3] & 3; d.alive = !!row[4]; d.last = now();
+    const t = typeof row[5] === 'string' ? decodeTail(row[5]) : null;
+    if (t){ d.tail = t; d.tailSet = new Set(t); }
+    if (d.alive && local.alive){ const hc = idx(Math.floor(row[1]), Math.floor(row[2])); if (local.tailSet.has(hc)) die(local, d.pk, ''); }
+  }
+  for (let i = 0; i < MAX_BOTS; i++) if (!seen.has(i)){ const d = players.get(dronePk(i)); if (d){ clearLand(d.slot); players.delete(d.pk); } }
+}
 const DRONE_NAMES = ['Nakamoto', 'Finney', 'Szabo', 'Back', 'Dai', 'Todd', 'Wuille', 'Maxwell'];
-function ensureDrones(){ const humans = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 6000)).length; const want = Math.max(0, botsWanted - Math.max(0, humans - 1)); while (drones.length < want){ const i = drones.length; const d = mkPlayer('drone' + i + '0000000000000000000000000000000000000000000000000000000000', true); d.name = DRONE_NAMES[i % DRONE_NAMES.length]; d.hue = (i * 67 + 200) % 360; d.pat = i % PATTERNS.length; d.plan = []; spawn(d); drones.push(d); } while (drones.length > want){ const d = drones.pop(); clearLand(d.slot); players.delete(d.pk); } }
+function ensureDrones(){ const humans = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 6000)).length; const want = Math.max(0, botsWanted - Math.max(0, humans - 1)); while (drones.length < want){ const i = drones.length;
+    // Adopt rather than re-create. On a handover this drone is already in players with the last
+    // position the previous authority published, and mkPlayer would replace it with a fresh
+    // object at 0,0 — the whole flock would teleport to the corner the moment anyone took over.
+    const had = players.has(dronePk(i)); const d = adoptDrone(i); d.plan = d.plan || [];
+    if (!had) spawn(d);
+    drones.push(d); } while (drones.length > want){ const d = drones.pop(); clearLand(d.slot); players.delete(d.pk); } }
 const label = p => p.drone ? p.name : nameOf(p.pk);
 function capture(p){
   for (const c of p.tail) owner[c] = p.slot;
@@ -156,7 +205,12 @@ function capture(p){
   const n = gained - p.tail.length; if (n > 0) rings.push({ x: (sx / n + .5) * CELL, y: (sy / n + .5) * CELL, r: 10, max: Math.sqrt(n) * CELL * 1.2, life: 1, color: colorOf(p, 1) });
   p.tail = []; p.tailSet = new Set();
   if (p === local){ if (gained > 20) feed(`you claimed ${gained} cells`, 'claim me'); sendLand(true); }
-  else if (gained > 120) feed(`${label(p)} claimed ${gained} cells`, 'claim');
+  else {
+    // A watching client renders a drone's trail from the flock but never runs this capture, so
+    // without publishing the result it would see the trail vanish and no territory appear.
+    if (p.drone && iDrive() && net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'dland', i: p.i, rle: rleMine(p.slot) }) }));
+    if (gained > 120) feed(`${label(p)} claimed ${gained} cells`, 'claim');
+  }
 }
 function die(p, by, why){
   if (!p.alive) return; p.alive = false; p.deaths++; p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set();
@@ -172,7 +226,7 @@ function enterCell(p, c){
   if (p.tailSet.has(c)) return die(p, null, 'crossed their own tail');
   for (const q of players.values()){ if (q === p || !q.alive) continue; if (q.tailSet.has(c)){
       if (q === local) die(local, p.pk, '');
-      else { die(q, p.pk, ''); if (p === local && !q.drone && net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()], ['p', q.pk]], content: JSON.stringify({ t: 'kill', victim: q.pk }) })); } } }
+      else { die(q, p.pk, ''); if (p === local && net.ready && (!q.drone || !iDrive())) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()], ['p', q.pk]], content: JSON.stringify({ t: 'kill', victim: q.pk }) })); } } }
   if (!p.alive) return;
   if (owner[c] === p.slot){ if (p.tail.length) capture(p); p.inside = true; }
   else { p.tail.push(c); p.tailSet.add(c); p.inside = false; if (p.tail.length > MAX_TAIL) die(p, null, 'stretched too thin'); }
@@ -187,7 +241,7 @@ function stepPlayer(p, dt){
 function step(dt){
   for (const p of players.values()){
     if (!p.alive){ if ((p === local && started || p.drone) && now() - p.diedAt > RESPAWN_MS) spawn(p); continue; }
-    if (p !== local && !p.drone){ if (now() - p.last > 8000){ clearLand(p.slot); players.delete(p.pk); continue; }
+    if (p !== local && (!p.drone || !iDrive())){ if (now() - p.last > 8000){ clearLand(p.slot); players.delete(p.pk); continue; }
       // Glide toward the last network position, dead-reckoned along the rider's heading so they
       // keep moving between 6 Hz ticks instead of pausing on each one. Extrapolation is capped at
       // 350 ms so a stalled sender drifts to a stop instead of sailing through walls.
@@ -201,7 +255,7 @@ function step(dt){
   }
   for (const q of parts){ q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 300 * dt; q.life -= dt * 1.4; } for (let i = parts.length - 1; i >= 0; i--) if (parts[i].life <= 0) parts.splice(i, 1);
   for (const r of rings){ r.r += (r.max - r.r) * dt * 4; r.life -= dt * 1.1; } for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
-  ensureDrones();
+  if (iDrive()) ensureDrones(); else if (drones.length) drones = [];
 }
 function driveDrone(p){
   const cx = Math.floor(p.x), cy = Math.floor(p.y);
@@ -254,7 +308,11 @@ function subscribe(){
       if (e.pubkey === me.sessPub) return; let c; try { c = JSON.parse(e.content); } catch { return; }
       const fresh = !players.has(e.pubkey); const p = players.get(e.pubkey) || mkPlayer(e.pubkey); if (!claims.has(e.pubkey)) wantProfile(e.pubkey);
       if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); }
-      if (e.kind === K_TICK){ if (typeof c.x !== 'number') return; p.d = c.d & 3;
+      if (e.kind === K_TICK){
+        // The flock rides on the authority's own tick. Ignore it from anyone else, and ignore it
+        // entirely while we are the ones driving — otherwise a stale authority's rows fight ours.
+        if (Array.isArray(c.dr) && !iDrive() && e.pubkey === droneAuthority()) applyFlock(c.dr);
+        if (typeof c.x !== 'number') return; p.d = c.d & 3;
         // Ticks arrive at 6 Hz; the draw loop runs at 60. Snapping x/y here made remote riders
         // teleport between tick positions. Store the network position and let step() glide toward
         // it — snap only on first sight, respawn, or a jump too big to be motion (> 4 cells).
@@ -269,7 +327,14 @@ function subscribe(){
       else if (e.kind === K_EVT){ p.last = now();
         if (c.t === 'land' && typeof c.rle === 'string' && c.rle.length < 30000) applyRle(p.slot, c.rle);
         else if (c.t === 'die'){ if (p.alive){ p.alive = false; burst(p.x * CELL, p.y * CELL, colorOf(p, 1), 30); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; feed(kn ? `${kn} wiped out ${nameOf(p.pk)}` : `${nameOf(p.pk)} wiped out`, c.by === me.sessPub ? 'kill me' : 'kill'); } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); if (c.by === me.sessPub) local.kills++; }
-        else if (c.t === 'kill' && c.victim === me.sessPub) die(local, e.pubkey, ''); } },
+        else if (c.t === 'dland' && typeof c.rle === 'string' && c.rle.length < 30000){
+          if (!iDrive() && e.pubkey === droneAuthority()){ const i = c.i | 0; if (i >= 0 && i < MAX_BOTS) applyRle(adoptDrone(i).slot, c.rle); } }
+        else if (c.t === 'kill'){
+          if (c.victim === me.sessPub) die(local, e.pubkey, '');
+          // A rider who cuts off a drone reports it; only the authority acts on that, so the
+          // flock has exactly one writer.
+          else if (iDrive() && typeof c.victim === 'string' && c.victim.startsWith('drone')){
+            const d = players.get(c.victim); if (d && d.drone) die(d, e.pubkey, ''); } } } },
     oneose: () => { net.ready = true; $('hRelay').classList.add('on'); },
     // nostr-tools 2.10.4 has no reconnect of its own, so a dropped subscription stays dropped and
     // the rider silently stops seeing anyone. This fires once every relay is gone; come back with
@@ -306,7 +371,12 @@ function decodeTail(str){
 }
 function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 1000 / TICK_HZ) return; net.lastTick = now();
   const tail = local.tail.slice(-MAX_TAIL), tp = encodeTail(tail);
-  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], ...(tp === null ? { tl: tail } : { tp }) }) }));
+  // The whole flock rides in this same event: seven separate drone events would mean seven
+  // schnorr signatures per tick, 42 a second, for no benefit.
+  const flock = iDrive() && drones.length
+    ? drones.map(d => [d.i, +d.x.toFixed(2), +d.y.toFixed(2), d.d, d.alive ? 1 : 0, encodeTail(d.tail.slice(-MAX_TAIL))])
+    : null;
+  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], ...(tp === null ? { tl: tail } : { tp }), ...(flock ? { dr: flock, nb: botsWanted } : {}) }) }));
   sendLand(false); }
 
 // ---------- rooms: presence beacons and the live-grid list ----------

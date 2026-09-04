@@ -29,3 +29,5 @@ export const published = Object.entries(KINDS).filter(([name]) =>
 
 export const isEphemeral = k => k >= 20000 && k < 30000;
 export const isAddressable = k => k >= 30000 && k < 40000;
+
+export const MAX_BOTS = Number(race.match(/MAX_BOTS = (\d+)/)?.[1]);
