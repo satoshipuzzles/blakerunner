@@ -2,7 +2,9 @@
 import { SimplePool, finalizeEvent, generateSecretKey, getPublicKey, nip19, verifyEvent } from 'https://esm.sh/nostr-tools@2.10.4';
 import { BunkerSigner, parseBunkerInput } from 'https://esm.sh/nostr-tools@2.10.4/nip46';
 
-const GAME_RELAYS = ['wss://coolfeed.feeds.relay.tools', 'wss://relay.mostr.pub', 'wss://purplerelay.com', 'wss://nos.lol'];
+// nos.lol dropped: it demands 28 bits of PoW on every kind and we mine none, so every publish
+// there is rejected and the socket only costs us connect time.
+const GAME_RELAYS = ['wss://coolfeed.feeds.relay.tools', 'wss://relay.mostr.pub', 'wss://purplerelay.com'];
 const PROFILE_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
 const K_TICK = 21110, K_EVT = 21111, K_SCORE = 2112, K_CLAIM = 2113, K_PRESENCE = 30078, TAG = 'hodland';
 // Rooms (Tank Arena pattern): a room is a string two people agreed on. Ticks/events carry the room tag so grids
@@ -183,12 +185,22 @@ let lastKey = 0;
 function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
 
 // ---------- netcode ----------
-const net = { ready: false, lastTick: 0, sub: null };
+const net = { ready: false, lastTick: 0, sub: null, gen: 0, retry: null };
 function subscribe(){
   if (net.sub) { try { net.sub.close(); } catch {} } net.ready = false; $('hRelay').classList.remove('on');
-  net.sub = pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [roomTag()], since: Math.floor(Date.now()/1000) - 8 }, { kinds: [K_CLAIM], '#t': [TAG], since: Math.floor(Date.now()/1000) - 86400 }], {
+  clearTimeout(net.retry); const gen = ++net.gen;
+  // Ticks and events are live-only: `limit: 0` instead of a `since`. A client-clock `since` is a
+  // trapdoor — a player whose clock runs fast stamps future timestamps but filters on its own
+  // clock, so everyone else's honestly-stamped events fall outside the window and the grid looks
+  // empty. No error, EOSE still fires. `limit: 0` asks the same question without a clock: strfry
+  // (mostr, purplerelay) stores ephemeral kinds for ~5min and replays them without it, newlay
+  // (coolfeed) never stores them at all, and all three honour it.
+  net.sub = pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [roomTag()], limit: 0 }, { kinds: [K_CLAIM], '#t': [TAG], since: Math.floor(Date.now()/1000) - 86400 }], {
     onevent: e => { if (!verifyEvent(e)) return;
       if (e.kind === K_CLAIM){ const sp = e.tags.find(t => t[0] === 'p')?.[1]; if (sp && /^[0-9a-f]{64}$/.test(sp) && sp !== me.sessPub){ claims.set(sp, e.pubkey); wantProfile(e.pubkey); } return; }
+      // Belt and braces for a relay that ignores `limit: 0`: anything before EOSE is stored
+      // history, and a replayed shot or death would be applied as if it just happened.
+      if (!net.ready) return;
       if (e.pubkey === me.sessPub) return; let c; try { c = JSON.parse(e.content); } catch { return; }
       const fresh = !players.has(e.pubkey); const p = players.get(e.pubkey) || mkPlayer(e.pubkey); if (!claims.has(e.pubkey)) wantProfile(e.pubkey);
       if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); }
@@ -200,7 +212,12 @@ function subscribe(){
         if (c.t === 'land' && typeof c.rle === 'string' && c.rle.length < 30000) applyRle(p.slot, c.rle);
         else if (c.t === 'die'){ if (p.alive){ p.alive = false; burst(p.x * CELL, p.y * CELL, colorOf(p, 1), 30); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; feed(kn ? `${kn} wiped out ${nameOf(p.pk)}` : `${nameOf(p.pk)} wiped out`, c.by === me.sessPub ? 'kill me' : 'kill'); } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); if (c.by === me.sessPub) local.kills++; }
         else if (c.t === 'kill' && c.victim === me.sessPub) die(local, e.pubkey, ''); } },
-    oneose: () => { net.ready = true; $('hRelay').classList.add('on'); } });
+    oneose: () => { net.ready = true; $('hRelay').classList.add('on'); },
+    // nostr-tools 2.10.4 has no reconnect of its own, so a dropped subscription stays dropped and
+    // the rider silently stops seeing anyone. This fires once every relay is gone; come back with
+    // a fresh subscription. `gen` keeps a late close from resurrecting a subscription we replaced.
+    onclose: () => { if (gen !== net.gen) return; net.ready = false; $('hRelay').classList.remove('on');
+      clearTimeout(net.retry); net.retry = setTimeout(() => { if (gen === net.gen) subscribe(); }, 2000); } });
 }
 function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 1000 / TICK_HZ) return; net.lastTick = now();
   pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()], ['h', String(chain.height)]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], tl: local.tail.slice(-MAX_TAIL) }) }));
