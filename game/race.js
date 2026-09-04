@@ -262,7 +262,9 @@ function subscribe(){
         p.netX = c.x; p.netY = c.y; p.netAt = now();
         p.alive = !!c.a; p.kills = c.k | 0; p.deaths = c.dd | 0; p.boostUntil = c.b ? now() + 300 : 0; p.last = now();
         if (Array.isArray(c.st)){ p.hue = (c.st[0] | 0) % 360; p.pat = Math.min(PATTERNS.length - 1, c.st[1] | 0); }
-        if (Array.isArray(c.tl)){ p.tail = c.tl.filter(n => Number.isInteger(n) && n >= 0 && n < owner.length).slice(-MAX_TAIL); p.tailSet = new Set(p.tail); }
+        if (typeof c.tp === 'string'){ const t = decodeTail(c.tp); if (t){ p.tail = t; p.tailSet = new Set(t); } }
+        // Legacy raw-array tails, kept so a not-yet-reloaded client's ticks still render.
+        else if (Array.isArray(c.tl)){ p.tail = c.tl.filter(n => Number.isInteger(n) && n >= 0 && n < owner.length).slice(-MAX_TAIL); p.tailSet = new Set(p.tail); }
         if (p.alive && local.alive){ const hc = idx(Math.floor(c.x), Math.floor(c.y)); if (local.tailSet.has(hc)) die(local, p.pk, ''); } }
       else if (e.kind === K_EVT){ p.last = now();
         if (c.t === 'land' && typeof c.rle === 'string' && c.rle.length < 30000) applyRle(p.slot, c.rle);
@@ -275,8 +277,36 @@ function subscribe(){
     onclose: () => { if (gen !== net.gen) return; net.ready = false; $('hRelay').classList.remove('on');
       clearTimeout(net.retry); net.retry = setTimeout(() => { if (gen === net.gen) subscribe(); }, 2000); } });
 }
+// A tail is a path of edge-adjacent cells, so it compresses to a start cell plus run-length
+// directions ("2f4R12U5L3") instead of up to 500 raw indices. Every tick still carries the
+// COMPLETE tail — nothing accumulates between ticks, so a late joiner's first tick is enough —
+// but a full tail is now tens of bytes instead of ~2.5 KB, which at 6 Hz per rider is the
+// difference between a ~3 KB/s room and the ~105 KB/s that was drowning phones.
+const DIRCH = { 1: 'R', [-1]: 'L', [COLS]: 'D', [-COLS]: 'U' }, CHDIR = { R: 1, L: -1, D: COLS, U: -COLS };
+function encodeTail(cells){
+  if (!cells.length) return '';
+  let s = cells[0].toString(36), runCh = '', runN = 0;
+  for (let i = 1; i < cells.length; i++){
+    const ch = DIRCH[cells[i] - cells[i - 1]]; if (!ch) return null; // non-adjacent: caller falls back to raw tl
+    if (ch === runCh) runN++; else { if (runN) s += runCh + runN; runCh = ch; runN = 1; }
+  }
+  if (runN) s += runCh + runN;
+  return s;
+}
+function decodeTail(str){
+  if (typeof str !== 'string' || str.length > 4000) return null; if (!str) return [];
+  const m = str.match(/^([0-9a-z]+)((?:[RLDU]\d+)*)$/); if (!m) return null;
+  let c = parseInt(m[1], 36); if (!(c >= 0 && c < COLS * ROWS)) return null;
+  const out = [c];
+  for (const run of m[2].matchAll(/([RLDU])(\d+)/g)){
+    const d = CHDIR[run[1]]; let n = +run[2];
+    while (n--){ c += d; if (c < 0 || c >= COLS * ROWS || out.length >= MAX_TAIL) return null; out.push(c); }
+  }
+  return out;
+}
 function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 1000 / TICK_HZ) return; net.lastTick = now();
-  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], tl: local.tail.slice(-MAX_TAIL) }) }));
+  const tail = local.tail.slice(-MAX_TAIL), tp = encodeTail(tail);
+  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], ...(tp === null ? { tl: tail } : { tp }) }) }));
   sendLand(false); }
 
 // ---------- rooms: presence beacons and the live-grid list ----------

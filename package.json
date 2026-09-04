@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/syntax.test.mjs test/netcode.test.mjs test/relay-config.test.mjs test/sw.test.mjs",
+    "test": "node --test test/syntax.test.mjs test/netcode.test.mjs test/relay-config.test.mjs test/sw.test.mjs test/tail-encoding.test.mjs",
     "test:relays": "node --test test/relay-contract.test.mjs"
   },
   "devDependencies": {
