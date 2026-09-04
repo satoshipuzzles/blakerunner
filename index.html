@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BlakeRunner — BLAKE2b Bitcoin explorer & lounge</title>
+<meta name="description" content="BLAKE2b Bitcoin block explorer with a Nostr lounge: live blocks and miners, mempool, 80-byte chat, profiles for every npub, on-chain zaps and sends, and a runner game.">
+<meta property="og:title" content="BlakeRunner"><meta property="og:description" content="BLAKE2b Bitcoin explorer, Nostr lounge, on-chain zaps, and a runner game.">
+<meta name="theme-color" content="#12042a">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23ff2e88'/%3E%3Ctext x='32' y='43' font-size='34' font-family='Arial' font-weight='700' text-anchor='middle' fill='%2312042a'%3EB%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="scene"><div class="stars"></div><div class="sun"></div><div class="city"></div><div class="grid"></div></div>
+
+<header class="top">
+  <a class="brand" href="/">Blake<span>Runner</span></a>
+  <form id="searchForm" class="search"><input id="searchInput" type="search" placeholder="height · block · txid · address · npub" autocomplete="off"><button class="btn small" type="submit">Go</button></form>
+  <nav>
+    <a href="/">Explorer</a>
+    <a href="/#lounge">Lounge</a>
+    <a href="/game">HODLAND</a>
+    <span id="userChip" class="chip hidden"><img id="chipPic" alt=""><span id="chipName"></span><button id="logoutBtn" title="Log out">×</button></span>
+    <button id="loginBtn" class="btn">Log in</button>
+  </nav>
+</header>
+
+<section class="stats" id="stats" aria-label="BLAKE2b Bitcoin stats">
+  <div class="stat"><small>Height</small><b id="sHeight">—</b></div>
+  <div class="stat"><small>Hashrate</small><b id="sHash">—</b></div>
+  <div class="stat"><small>Difficulty epoch</small><b id="sEpoch">—</b><i class="bar"><u id="sEpochBar"></u></i></div>
+  <div class="stat"><small>Next retarget</small><b id="sRetarget">—</b></div>
+  <div class="stat"><small>Mempool</small><b id="sMempool">—</b></div>
+  <div class="stat"><small>Fee</small><b id="sFee">—</b></div>
+  <a class="stat src" href="https://mempool.guide" target="_blank" rel="noopener"><small>data</small><b>mempool.guide</b></a>
+</section>
+
+<!-- ===== HOME: blocks + lounge ===== -->
+<main id="view-home" class="view">
+  <section class="blocksWrap panel">
+    <div class="blocksHead"><b>Chain</b><span class="muted small">projected mempool blocks on the left, mined blocks on the right · click a block</span><span id="blocksState" class="dot"></span></div>
+    <div class="blocksScroll"><div id="mempoolBlocks" class="blocks projected"></div><div class="chainGap"><span></span></div><div id="chainBlocks" class="blocks mined"></div></div>
+  </section>
+
+  <div class="app" id="lounge">
+    <aside class="buddies panel">
+      <h3>Buddy list <span id="buddyCount"></span></h3>
+      <ul id="buddyList"></ul>
+      <div class="hint">People seen in the lounge. Click a name for their page.</div>
+    </aside>
+    <section class="center">
+      <div class="panel chat">
+        <div class="chatHead"><b>#blake lounge</b><span id="relayState" class="dot"></span><span class="mono">kind 2110 · 80 bytes · text only</span></div>
+        <div id="chatLog" class="log" aria-live="polite"><div class="sys">Connecting to relays…</div></div>
+        <form id="chatForm" class="composer">
+          <span id="replyTo" class="replyTo hidden"></span>
+          <input id="chatInput" type="text" maxlength="80" placeholder="Say something (80 bytes)" autocomplete="off" disabled>
+          <span id="byteCount" class="mono">0/80</span>
+          <button id="sendBtn" class="btn" disabled>Send</button>
+        </form>
+      </div>
+    </section>
+    <aside class="wallet panel">
+      <h3>Your BLAKE2b wallet</h3>
+      <div id="walletOut" class="muted pad">Log in to see the addresses derived from your npub, nostronchain style.</div>
+      <div id="walletIn" class="hidden">
+        <div class="addr"><small>balance</small><b id="wBalance">…</b></div>
+        <div class="qrWrap"><img id="wQr" alt="segwit address QR"><div class="addr"><small>segwit · receive here</small><code id="wSegwit"></code></div></div>
+        <div class="addr"><small>taproot</small><code id="wTaproot"></code></div>
+        <div class="row pad"><button id="sendOpenBtn" class="btn alt">Send sats</button><a id="wAddrLink" class="btn ghost" href="#">Explorer</a></div>
+        <div id="keyState" class="hint"></div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<!-- ===== PROFILE ===== -->
+<main id="view-profile" class="view hidden"><div class="panel profile">
+  <a class="back" href="/">← lounge</a>
+  <div class="pHead">
+    <img id="pPic" alt="">
+    <div><h2 id="pName">…</h2><div id="pNip05" class="mono muted"></div><div id="pNpub" class="mono small"></div></div>
+    <button id="zapBtn" class="btn zap">⚡ Zap</button>
+  </div>
+  <p id="pAbout" class="about"></p>
+  <div class="addrs two">
+    <div class="addr"><small>BLAKE2b balance</small><b id="pBalance">…</b></div>
+    <div class="qrWrap"><img id="pQr" alt="QR"><div class="addr"><small>segwit (zap target)</small><code id="pSegwit"></code><a id="pSegwitLink" class="small" href="#">explorer →</a></div></div>
+    <div class="addr"><small>taproot</small><code id="pTaproot"></code></div>
+  </div>
+  <h3>Recent in the lounge</h3>
+  <div id="pLog" class="log short"></div>
+</div></main>
+
+<!-- ===== EXPLORER PAGES ===== -->
+<main id="view-block" class="view hidden"><div class="panel page"><a class="back" href="/">← chain</a><div id="blockOut"></div></div></main>
+<main id="view-tx" class="view hidden"><div class="panel page"><a class="back" href="/">← chain</a><div id="txOut"></div></div></main>
+<main id="view-address" class="view hidden"><div class="panel page"><a class="back" href="/">← chain</a><div id="addressOut"></div></div></main>
+
+
+<!-- ===== MODALS ===== -->
+<div id="loginModal" class="modal hidden"><div class="box">
+  <h2>Log in</h2>
+  <button id="nip07Btn" class="btn wide">Nostr extension (NIP-07)</button>
+  <div class="or">or use a key in this browser (needed for zaps and sends)</div>
+  <input id="nsecInput" type="password" placeholder="nsec1… (leave empty to create a new key)" autocomplete="off">
+  <input id="passInput" type="password" placeholder="passphrase to encrypt it locally (recommended)" autocomplete="new-password">
+  <button id="localKeyBtn" class="btn wide alt">Use this key</button>
+  <div class="or">or a remote signer (NIP-46 bunker, e.g. nsec.app)</div>
+  <input id="bunkerInput" type="text" placeholder="bunker://… or name@nsec.app" autocomplete="off" spellcheck="false">
+  <button id="bunkerBtn" class="btn wide ghost">Connect bunker</button>
+  <div id="loginErr" class="err"></div>
+  <button class="close" data-close="loginModal">×</button>
+</div></div>
+<div id="unlockModal" class="modal hidden"><div class="box">
+  <h2>Unlock your key</h2>
+  <input id="unlockPass" type="password" placeholder="passphrase" autocomplete="current-password">
+  <button id="unlockBtn" class="btn wide">Unlock</button>
+  <button id="forgetBtn" class="link">forget this key</button>
+  <div id="unlockErr" class="err"></div>
+</div></div>
+<div id="zapModal" class="modal hidden"><div class="box">
+  <h2>⚡ Zap <span id="zapName"></span></h2>
+  <div class="muted small">On-chain BLAKE2b sats from your segwit address to theirs, broadcast via mempool.guide.</div>
+  <input id="zapAmount" type="number" min="546" step="1" placeholder="amount in sats" value="1000">
+  <input id="zapNote" type="text" maxlength="60" placeholder="note (optional, counts toward 80 bytes)">
+  <div id="zapQuote" class="mono small muted"></div>
+  <button id="zapSend" class="btn wide zap">Send zap</button>
+  <div id="zapErr" class="err"></div>
+  <button class="close" data-close="zapModal">×</button>
+</div></div>
+<div id="sendModal" class="modal hidden"><div class="box">
+  <h2>Send BLAKE2b sats</h2>
+  <input id="sendTo" type="text" placeholder="destination address (bc1q…, bc1p…, 1…, 3…)" autocomplete="off" spellcheck="false">
+  <input id="sendAmount" type="number" min="546" step="1" placeholder="amount in sats">
+  <div id="sendQuote" class="mono small muted"></div>
+  <button id="sendGo" class="btn wide alt">Sign & broadcast</button>
+  <div id="sendErr" class="err"></div>
+  <button class="close" data-close="sendModal">×</button>
+</div></div>
+
+<div id="toast" class="toast hidden"></div>
+<footer class="foot">BlakeRunner · <span class="mono">blakerunner2026</span> · chat kind 2110 · zap kind 2111 · addresses like <a href="https://nostronchain.com" target="_blank" rel="noopener">nostronchain</a> · data <a href="https://mempool.guide" target="_blank" rel="noopener">mempool.guide</a></footer>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

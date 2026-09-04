@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>HODLAND — claim the BLAKE2b grid</title>
+<meta name="description" content="Claim land on the neon grid. Ride out, loop back, hold what you enclosed. Cut a tail to wipe a rider out. Most land when the next BLAKE2b block lands wins. Nostr relays are the netcode.">
+<meta property="og:title" content="HODLAND"><meta property="og:description" content="Claim and hold land on the BLAKE2b grid. Nostr netcode, block-clocked rounds.">
+<meta property="og:image" content="https://forever21.lol/game/icon-512.png">
+<meta name="theme-color" content="#12042a">
+<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="HODLAND">
+<link rel="manifest" href="/game/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/game/apple-touch-icon.png">
+<link rel="icon" href="/game/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+<style>
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+.scene .sun{top:4vh;opacity:.5}.scene .grid{opacity:.3}
+.gtop{display:flex;align-items:center;gap:12px;padding:8px 14px calc(8px);flex-wrap:nowrap;padding-top:max(8px,env(safe-area-inset-top))}
+.gtop .brand{display:flex;align-items:center;gap:8px;font-size:22px}.gtop .brand img{width:30px;height:30px;border-radius:7px}
+.gtop .brand em{font-style:normal;color:var(--cyan);font-weight:800;font-size:15px;letter-spacing:.08em}
+.gtop .block{font-family:var(--mono);font-size:12.5px;color:var(--ink2);display:flex;gap:12px;align-items:center;margin-left:auto;white-space:nowrap}
+.gtop .block b{color:var(--yellow)}
+.gtop a.l{color:var(--ink2);text-decoration:none;font-size:13px;font-weight:600}
+#wrap{position:relative;margin:0 12px 12px;height:calc(100vh - 62px);height:calc(100dvh - 62px);border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:0 10px 40px rgba(0,0,0,.45);background:#0b0220}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+.hud{position:absolute;left:10px;top:10px;display:flex;flex-direction:column;gap:5px;pointer-events:none;max-width:46vw}
+.hud .row{background:rgba(20,6,48,.78);border:1px solid var(--line2);border-radius:10px;padding:5px 9px;font-size:12.5px;display:flex;align-items:center;gap:7px;backdrop-filter:blur(6px);pointer-events:auto;cursor:pointer}
+.hud .row img{width:20px;height:20px;border-radius:50%;object-fit:cover;background:#2a0b55;flex:none}
+.hud .row span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hud .row b{font-family:var(--mono);margin-left:auto;color:var(--yellow)}
+.hud .row .k{font-family:var(--mono);color:var(--pink);min-width:26px;text-align:right}
+.hud .row.me{border-color:var(--pink)}.hud .row.drone{opacity:.7}
+.feed{position:absolute;left:50%;top:10px;transform:translateX(-50%);display:flex;flex-direction:column;gap:5px;align-items:center;pointer-events:none;width:min(92%,520px)}
+.feed div{background:rgba(20,6,48,.85);border:1px solid var(--line2);border-radius:999px;padding:5px 14px;font-size:13px;color:#fff;animation:feedin .25s ease-out;backdrop-filter:blur(6px);text-align:center}
+.feed div.kill{border-color:var(--pink);color:#ffd6e8}.feed div.claim{border-color:var(--green);color:#d8ffe9}.feed div.me{border-color:var(--yellow)}
+@keyframes feedin{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.boost{position:absolute;left:50%;bottom:calc(12px + env(safe-area-inset-bottom));transform:translateX(-50%);width:150px;height:7px;background:rgba(255,255,255,.12);border-radius:99px;overflow:hidden;pointer-events:none}
+.boost i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--pink));width:100%}
+.tip{position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--muted);background:rgba(20,6,48,.7);padding:6px 10px;border-radius:10px;pointer-events:none}
+.gbtns{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.gbtns .btn{padding:7px 11px;font-size:12.5px}
+.overlay{position:absolute;inset:0;display:grid;place-items:center;background:rgba(6,0,20,.74);backdrop-filter:blur(4px);z-index:5;overflow:auto;padding:12px}
+.overlay .box{width:min(560px,96%);text-align:center}
+.overlay h1{font-size:46px;margin:0 0 4px;letter-spacing:.06em;font-weight:900;background:linear-gradient(92deg,var(--cyan),var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent}
+.overlay h1 img{width:52px;height:52px;vertical-align:-10px;margin-right:8px;border-radius:12px}
+.overlay p{color:var(--ink2);margin:6px 0 12px;font-size:14.5px}
+.overlay .btn{margin:5px 3px}
+.who{display:flex;align-items:center;gap:10px;justify-content:center;margin:6px 0 10px;color:var(--ink)}
+.who img{width:40px;height:40px;border-radius:50%;object-fit:cover;background:#2a0b55;border:2px solid var(--pink)}
+.podium{display:grid;gap:5px;margin:8px auto 10px;max-width:420px;text-align:left}
+.podium .p{display:flex;gap:9px;align-items:center;background:rgba(0,0,0,.3);border:1px solid var(--line2);border-radius:10px;padding:5px 10px;text-decoration:none;color:var(--ink);font-size:14px}
+.podium .p:first-child{border-color:var(--yellow)}
+.podium .p img{width:24px;height:24px;border-radius:50%;object-fit:cover;background:#2a0b55}
+.podium .p b{margin-left:auto;font-family:var(--mono);color:var(--yellow);white-space:nowrap}
+.podium .p .sub{color:var(--muted);font-size:11.5px;font-family:var(--mono)}
+.dead{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;z-index:4}
+.dead div{font-size:40px;font-weight:900;color:var(--pink);text-shadow:0 0 30px var(--pink);letter-spacing:-.03em;text-align:center}
+.dead small{display:block;font-size:14px;color:var(--ink2);font-weight:500;margin-top:4px}
+input.pass,input.bunker{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;padding:9px 12px;border-radius:10px;font-size:14px;outline:none;width:min(360px,92%);margin-top:8px;font-family:var(--mono)}
+.style{display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;margin:8px 0 6px}
+.style input[type=range]{width:180px;accent-color:var(--pink)}
+.swatch{width:34px;height:34px;border-radius:8px;border:2px solid transparent;cursor:pointer;background-size:12px 12px}
+.swatch.on{border-color:#fff;box-shadow:var(--glow)}
+.tabs{display:flex;gap:6px;justify-content:center;margin:6px 0 10px}
+.tabs button{background:transparent;border:1px solid var(--line2);color:var(--ink2);padding:6px 12px;border-radius:999px;cursor:pointer;font-weight:700;font-size:13px}
+.tabs button.on{background:var(--pink);color:#12042a;border-color:var(--pink)}
+.close2{position:absolute;top:10px;right:14px;background:none;border:0;color:var(--muted);font-size:26px;cursor:pointer}
+@media (max-width:760px){.feed{top:auto;bottom:calc(34px + env(safe-area-inset-bottom));width:min(70%,360px);left:8px;transform:none;align-items:flex-start}.feed div{font-size:12px;padding:4px 10px}.gtop{padding:6px 10px}.gtop .brand{font-size:18px}.gtop .brand em{display:none}.gtop a.l{display:none}.gtop .block{font-size:11px;gap:8px}
+ #wrap{margin:0 6px 6px;height:calc(100dvh - 50px)}.hud{gap:3px}.hud .row{font-size:11px;padding:3px 7px}.hud .row:nth-child(n+4){display:none}.tip{display:none}.overlay h1{font-size:34px}.gbtns .btn{padding:6px 9px;font-size:11.5px}}
+</style>
+</head>
+<body>
+<div class="scene"><div class="stars"></div><div class="sun"></div><div class="grid"></div></div>
+<header class="gtop">
+  <a class="brand" href="/"><img src="/game/logo.svg" alt="">HODL<span>AND</span></a>
+  <a class="l" href="/">← lounge</a>
+  <div class="block"><span>blk <b id="hBlock">…</b></span><span>next <b id="hClock">…</b></span><span><b id="hRiders">0</b> riders</span><span id="hRelay" class="dot"></span></div>
+</header>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div class="hud" id="hud"></div>
+  <div class="feed" id="feed"></div>
+  <div class="gbtns"><button id="btnBoard" class="btn ghost">Leaderboard</button><button id="btnStyle" class="btn ghost">My colors</button></div>
+  <div class="boost"><i id="boostBar"></i></div>
+  <div class="tip">← ↑ → ↓ / WASD steer · space boost · swipe + tap on phone · get home to claim</div>
+  <div id="deadMsg" class="dead hidden"><div>WIPED OUT<small id="deadBy"></small></div></div>
+
+  <div id="lobby" class="overlay"><div class="box">
+    <h1><img src="/game/logo.svg" alt="">HODLAND</h1>
+    <p>Start on a tiny plot. Ride out, loop back home, and everything you enclosed is yours to hold. Cross a rider's tail while they're out and they lose it all. Touch your own tail or the edge and so do you. Most land when the next <b>BLAKE2b</b> block is mined takes the round.</p>
+    <div id="who" class="who hidden"><img id="whoPic" alt=""><span id="whoName"></span></div>
+    <div id="loginRow">
+      <button id="btnLounge" class="btn">Ride with my lounge login</button>
+      <button id="btnNip07" class="btn ghost">NIP-07 extension</button>
+      <button id="btnBunkerShow" class="btn ghost">Remote signer (bunker)</button>
+      <button id="btnGuest" class="btn ghost">Ride as guest</button>
+      <div id="bunkerRow" class="hidden"><input id="bunkerIn" class="bunker" type="text" placeholder="bunker://… or name@nsec.app" autocomplete="off" spellcheck="false"><br><button id="btnBunker" class="btn alt">Connect</button></div>
+      <input id="passIn" class="pass hidden" type="password" placeholder="lounge passphrase" autocomplete="current-password">
+    </div>
+    <div id="rideRow" class="hidden">
+      <div class="style"><label class="small muted">land color</label><input id="hueIn" type="range" min="0" max="359"><div id="patterns" class="row" style="justify-content:center"></div></div>
+      <button id="btnRide" class="btn zap">Ride →</button><button id="btnSwitch" class="link">switch rider</button>
+    </div>
+    <div id="lobbyErr" class="err"></div>
+    <div id="lastPodium" class="podium"></div>
+  </div></div>
+
+  <div id="podium" class="overlay hidden"><div class="box">
+    <h1>BLOCK <span id="podBlock"></span></h1>
+    <p>Round over. New block: the grid is wiped and everyone starts from a plot.</p>
+    <div id="podList" class="podium"></div>
+    <p class="muted small" id="podNote"></p>
+  </div></div>
+
+  <div id="board" class="overlay hidden"><div class="box" style="position:relative">
+    <button class="close2" id="boardClose">×</button>
+    <h1 style="font-size:30px">Leaderboard</h1>
+    <div class="tabs"><button class="on" data-tab="now">This block</button><button data-tab="career">All time</button></div>
+    <div id="boardNow" class="podium"></div>
+    <div id="boardCareer" class="podium hidden"><div class="sys">Loading signed rounds from relays…</div></div>
+    <p class="muted small">Every row is a kind 2112 event signed by that rider's npub. Tap a rider for their profile and BLAKE2b wallet.</p>
+  </div></div>
+
+  <div id="styleBox" class="overlay hidden"><div class="box" style="position:relative">
+    <button class="close2" id="styleClose">×</button>
+    <h1 style="font-size:30px">My land</h1>
+    <div class="style"><label class="small muted">color</label><input id="hueIn2" type="range" min="0" max="359"><div id="patterns2" class="row" style="justify-content:center"></div></div>
+    <canvas id="stylePreview" width="240" height="120" style="border-radius:10px;border:1px solid var(--line2)"></canvas>
+  </div></div>
+</div>
+<script type="module" src="/game/race.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    {
+      "source": "/mp/:path*",
+      "destination": "https://mempool.guide/api/:path*"
+    },
+    {
+      "source": "/p/:npub",
+      "destination": "/"
+    },
+    {
+      "source": "/block/:id",
+      "destination": "/"
+    },
+    {
+      "source": "/tx/:id",
+      "destination": "/"
+    },
+    {
+      "source": "/address/:addr",
+      "destination": "/"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        }
+      ]
+    }
+  ]
+}
