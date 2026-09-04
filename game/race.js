@@ -26,12 +26,13 @@ const GAME_RELAYS = (() => {
   if (raw) localStorage.setItem('br_relays', wanted.join(','));
   return wanted;
 })();
-// Scores and session claims are stored kinds written once per block: reach matters for them,
-// latency does not, so they do not belong on the realtime list. They need their own set because
-// coolfeed's write gate refuses 2112/2113 by design while the score protocol is undecided —
-// pointing everything at coolfeed alone would silently stop the leaderboard recording. Fold
-// coolfeed in here once those kinds are exempt or migrated to a blakerunner-specific kind.
-const SCORE_RELAYS = ['wss://relay.mostr.pub', 'wss://purplerelay.com'];
+// Scores and claims kept their own list only because coolfeed's write gate refused 2112/2113.
+// That gate is now open for both kinds, and the 164 signed events that existed on the old
+// relays (141 scores, 23 claims) were republished to coolfeed and read back, so no round is
+// orphaned by this move. Still a separate constant from the realtime list: these are stored
+// kinds written once per block, and the day 2112 moves to a blakerunner-specific addressable
+// kind, this is the line that changes rather than the netcode.
+const SCORE_RELAYS = ['wss://coolfeed.feeds.relay.tools'];
 const PROFILE_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
 const K_TICK = 21110, K_EVT = 21111, K_SCORE = 2112, K_CLAIM = 2113, K_PRESENCE = 30078, TAG = 'hodland';
 // Rooms (Tank Arena pattern): a room is a string two people agreed on. Ticks/events carry the room tag so grids
@@ -212,6 +213,13 @@ let lastKey = 0;
 function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
 
 // ---------- netcode ----------
+// Ticks carry only their room tag. They also used to carry ['h', block height], which nothing
+// ever read — and 'h' is NIP-29's group tag, so a relay implementing groups routes the event
+// into its workspace plane and demands membership. strfry ignores it, which is why this only
+// surfaced once the realtime plane moved to a single NIP-29-aware relay: every guest tick came
+// back "auth-required: relay membership required to publish workspace content", so riders saw
+// each other join and take land but never move. If a tick ever needs the block height, put it
+// in the content — a single-letter tag is relay-reserved namespace, not app scratch space.
 const net = { ready: false, lastTick: 0, sub: null, claimSub: null, gen: 0, retry: null };
 function subscribe(){
   if (net.sub) { try { net.sub.close(); } catch {} } if (net.claimSub) { try { net.claimSub.close(); } catch {} } net.ready = false; $('hRelay').classList.remove('on');
@@ -254,7 +262,7 @@ function subscribe(){
       clearTimeout(net.retry); net.retry = setTimeout(() => { if (gen === net.gen) subscribe(); }, 2000); } });
 }
 function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 1000 / TICK_HZ) return; net.lastTick = now();
-  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()], ['h', String(chain.height)]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], tl: local.tail.slice(-MAX_TAIL) }) }));
+  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], tl: local.tail.slice(-MAX_TAIL) }) }));
   sendLand(false); }
 
 // ---------- rooms: presence beacons and the live-grid list ----------

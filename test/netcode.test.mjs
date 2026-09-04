@@ -93,3 +93,25 @@ test('the kill/death display survives a relay refactor', () => {
   assert.ok(race.includes('☠'), 'the deaths glyph is missing from the boards');
   assert.match(race, /a\.deaths \+= r\.deaths/, 'the all-time board must keep aggregating deaths');
 });
+
+test('published events do not carry an h tag', () => {
+  // 'h' is NIP-29's group tag. A relay that implements groups routes any h-tagged event into its
+  // workspace plane and requires membership there, so a guest publish comes back
+  // "auth-required: relay membership required to publish workspace content". Ticks carried
+  // ['h', block height] that nothing read; strfry ignored it, so it only broke once the realtime
+  // plane moved to a single NIP-29-aware relay — riders saw each other join but never move.
+  // Scans the bracket depth rather than regexing to the first ']', which stops inside the very
+  // nested array the tag lives in and makes the check silently vacuous.
+  const sites = [];
+  for (const m of race.matchAll(/kind:\s*(K_[A-Z]+),\s*tags:\s*\[/g)) {
+    let i = m.index + m[0].length - 1, depth = 0;
+    do { if (race[i] === '[') depth++; else if (race[i] === ']') depth--; i++; }
+    while (depth > 0 && i < race.length);
+    sites.push([m[1], race.slice(m.index, i)]);
+  }
+  assert.ok(sites.length >= 4, `expected the publish sites, found ${sites.length}`);
+  for (const [kind, src] of sites) {
+    assert.doesNotMatch(src, /\[\s*'h'\s*,/,
+      `${kind} publishes an 'h' tag — that is NIP-29 group namespace, put app data in the content`);
+  }
+});
