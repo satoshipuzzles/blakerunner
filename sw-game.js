@@ -10,6 +10,8 @@ self.addEventListener('fetch', e => {
   if (u.pathname.startsWith('/mp/')) return;
   const isShell = SHELL.includes(u.pathname) || u.pathname === '/game/';
   if (!isShell) return;
-  e.respondWith(fetch(e.request).then(r => { if (r.ok) caches.open(V).then(c => c.put(e.request, r.clone())); return r; })
+  // Clone synchronously: the body can be read only once, and `caches.open` resolves after we have
+  // already returned `r` to the page, so cloning inside that callback races the browser reading it.
+  e.respondWith(fetch(e.request).then(r => { if (r.ok) { const copy = r.clone(); caches.open(V).then(c => c.put(e.request, copy)); } return r; })
     .catch(() => caches.match(e.request, { ignoreSearch: true })));
 });
