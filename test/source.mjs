@@ -12,8 +12,11 @@ const arrayOf = name => {
   return [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
 };
 
-export const GAME_RELAYS = arrayOf('GAME_RELAYS');
+// GAME_RELAYS is resolved at runtime from ?relays / localStorage, so the testable value is the
+// default the game ships with.
+export const GAME_RELAYS = arrayOf('DEFAULT_GAME_RELAYS');
 export const PROFILE_RELAYS = arrayOf('PROFILE_RELAYS');
+export const SCORE_RELAYS = arrayOf('SCORE_RELAYS');
 
 export const KINDS = Object.fromEntries(
   [...race.matchAll(/\b(K_[A-Z]+)\s*=\s*(\d+)/g)].map(m => [m[1], Number(m[2])])
