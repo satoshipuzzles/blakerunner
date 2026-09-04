@@ -334,8 +334,21 @@ async function roundOver(prevHeight){
   if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
   setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); for (const p of players.values()){ p.kills = 0; p.deaths = 0; if (p === local ? started : true) spawn(p); } }, 7000);
 }
-async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]); if (!h || seen.has(e.pubkey + h)) continue; seen.add(e.pubkey + h); let c = {}; try { c = JSON.parse(e.content); } catch {} rows.push({ pk: e.pubkey, h, land: c.land | 0, cells: c.cells || COLS * ROWS, kills: c.kills | 0, deaths: c.deaths | 0 }); } return rows; }
+async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]);
+    // Some early events carry a unix timestamp where the height belongs; a BLAKE2b height is
+    // ~1e6, a timestamp ~1.8e9. Anything past 50M is not a block on this chain.
+    if (!h || h > 50e6 || seen.has(e.pubkey + h)) continue; seen.add(e.pubkey + h); let c = {}; try { c = JSON.parse(e.content); } catch {} rows.push({ pk: e.pubkey, h, land: c.land | 0, cells: c.cells || COLS * ROWS, kills: c.kills | 0, deaths: c.deaths | 0 }); } return rows; }
 async function lastPodium(){ const rows = await fetchScores(80); if (!rows.length) return; const top = Math.max(...rows.map(r => r.h)); const rr = rows.filter(r => r.h === top).sort((a, b) => b.land - a.land); for (const r of rr) wantProfile(r.pk); $('lastPodium').innerHTML = `<div class="muted small" style="text-align:center">Last signed round · block ${top.toLocaleString()}</div>` + rr.slice(0, 5).map((r, i) => `<a class="p" href="/p/${nip19.npubEncode(r.pk)}" target="_blank" rel="noopener"><span class="mono muted">${i + 1}</span><img src="${picOf(r.pk)}" alt=""><span>${esc(nameOf(r.pk))}</span><b>${(r.land / r.cells * 100).toFixed(1)}%</b></a>`).join(''); }
+// Block wall (Tank Arena pattern): one card per block in chain order, the way an explorer shows
+// blocks — the winner is whoever published the biggest signed land number for that height. Same
+// caveat as the whole screen: these are self-signed claims, winning means publishing the number.
+async function blockWall(){
+  const rows = await fetchScores(500); if (!rows.length){ $('boardBlocks').innerHTML = '<div class="sys">No signed rounds on the relays yet. Be the first.</div>'; return; }
+  const byH = new Map(); for (const r of rows){ let b = byH.get(r.h); if (!b) byH.set(r.h, b = { h: r.h, riders: 0, win: r }); b.riders++; if (r.land > b.win.land) b.win = r; }
+  const blocks = [...byH.values()].sort((a, b) => b.h - a.h).slice(0, 30); for (const b of blocks) wantProfile(b.win.pk);
+  $('boardBlocks').innerHTML = blocks.map(b => `<a class="p won" href="/p/${nip19.npubEncode(b.win.pk)}" target="_blank" rel="noopener"><span class="bh">#${b.h.toLocaleString()}</span><img src="${picOf(b.win.pk)}" alt=""><span>${esc(nameOf(b.win.pk))}<br><span class="sub">${b.riders} rider${b.riders === 1 ? '' : 's'} signed · ${b.win.kills}✂ ${b.win.deaths}☠</span></span><b>${(b.win.land / b.win.cells * 100).toFixed(1)}%</b></a>`).join('')
+    + (byH.size > 30 ? '<div class="sys">…older blocks fell off the wall.</div>' : '');
+}
 async function career(){
   const rows = await fetchScores(500); if (!rows.length){ $('boardCareer').innerHTML = '<div class="sys">No signed rounds on the relays yet. Be the first.</div>'; return; }
   const byH = new Map(); for (const r of rows){ if (!byH.has(r.h) || byH.get(r.h).land < r.land) byH.set(r.h, r); }
@@ -418,7 +431,7 @@ $('btnLeave').onclick = () => { $('lobby').classList.remove('hidden'); renderLiv
 $('liveRefresh').onclick = renderLive;
 $('btnBoard').onclick = () => { $('board').classList.remove('hidden'); $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); career(); };
 $('boardClose').onclick = () => $('board').classList.add('hidden');
-document.querySelectorAll('.tabs button').forEach(b => { b.onclick = () => { document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b)); $('boardNow').classList.toggle('hidden', b.dataset.tab !== 'now'); $('boardCareer').classList.toggle('hidden', b.dataset.tab !== 'career'); }; });
+document.querySelectorAll('.tabs button').forEach(b => { b.onclick = () => { document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b)); $('boardNow').classList.toggle('hidden', b.dataset.tab !== 'now'); $('boardBlocks').classList.toggle('hidden', b.dataset.tab !== 'blocks'); $('boardCareer').classList.toggle('hidden', b.dataset.tab !== 'career'); if (b.dataset.tab === 'blocks') blockWall(); }; });
 $('btnStyle').onclick = () => { $('styleBox').classList.remove('hidden'); syncStyleUI(); drawStylePreview(); };
 $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });

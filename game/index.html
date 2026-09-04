@@ -65,6 +65,8 @@ input.pass,input.bunker{background:rgba(0,0,0,.35);border:1px solid var(--line2)
 .tabs{display:flex;gap:6px;justify-content:center;margin:6px 0 10px}
 .tabs button{background:transparent;border:1px solid var(--line2);color:var(--ink2);padding:6px 12px;border-radius:999px;cursor:pointer;font-weight:700;font-size:13px}
 .tabs button.on{background:var(--pink);color:#12042a;border-color:var(--pink)}
+.podium .p .bh{font-family:var(--mono);color:var(--cyan,#0ff);font-size:12px;min-width:74px;text-align:left}
+.podium .p.won{border-color:var(--yellow)}
 .close2{position:absolute;top:10px;right:14px;background:none;border:0;color:var(--muted);font-size:26px;cursor:pointer}
 .btn.tiny{padding:5px 10px;font-size:12px}
 .roomrow{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;margin:10px 0 4px}
@@ -167,8 +169,9 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
   <div id="board" class="overlay hidden"><div class="box" style="position:relative">
     <button class="close2" id="boardClose">×</button>
     <h1 style="font-size:30px">Leaderboard</h1>
-    <div class="tabs"><button class="on" data-tab="now">This block</button><button data-tab="career">All time</button></div>
+    <div class="tabs"><button class="on" data-tab="now">This block</button><button data-tab="blocks">Block wall</button><button data-tab="career">All time</button></div>
     <div id="boardNow" class="podium"></div>
+    <div id="boardBlocks" class="podium hidden"><div class="sys">Loading signed rounds from relays…</div></div>
     <div id="boardCareer" class="podium hidden"><div class="sys">Loading signed rounds from relays…</div></div>
     <p class="muted small">Every row is a kind 2112 event signed by that rider's npub. Tap a rider for their profile and BLAKE2b wallet.</p>
   </div></div>
