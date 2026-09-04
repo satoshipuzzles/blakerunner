@@ -59,7 +59,8 @@ blocks, signed scores). Everything except the block clock is a Nostr event.
   session key: pos, dir, tail cells, style), 21111 event (`land` RLE every 5 s and on capture,
   `die`, `kill`), 2113 session claim (session pub → npub), 2112 signed round score
   (`#t hodland-<height>`, `d` = height, content land/cells/kills/deaths). Leaderboard "This block"
-  is live standings; "All time" aggregates kind 2112 events (block wins, rounds, best %, kills).
+  is live standings; "All time" aggregates kind 2112 events (block wins, rounds, best %, kills,
+  deaths, K/D ratio).
   Rows link to `/p/<npub>` where the rider's BLAKE2b wallet is shown.
 - **Grids (rooms)**: a room is a string two riders agreed on (Tank Arena pattern). Ticks and events
   carry `#t hodland-r-<room>` so grids stay separate; session claims and signed scores stay global.
