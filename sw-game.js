@@ -12,6 +12,9 @@ self.addEventListener('fetch', e => {
   if (!isShell) return;
   // Clone synchronously: the body can be read only once, and `caches.open` resolves after we have
   // already returned `r` to the page, so cloning inside that callback races the browser reading it.
-  e.respondWith(fetch(e.request).then(r => { if (r.ok) { const copy = r.clone(); caches.open(V).then(c => c.put(e.request, copy)); } return r; })
-    .catch(() => caches.match(e.request, { ignoreSearch: true })));
+  e.respondWith(fetch(e.request).then(r => { if (r.ok) { const copy = r.clone(); caches.open(V).then(c => c.put(e.request, copy)).catch(() => {}); } return r; })
+    // caches.match resolves to undefined on a miss, and respondWith(undefined) is itself a
+    // TypeError — so an offline request for something never cached needs a real Response.
+    .catch(() => caches.match(e.request, { ignoreSearch: true }).then(hit =>
+      hit || new Response('', { status: 504, statusText: 'Offline and not cached' }))));
 });
