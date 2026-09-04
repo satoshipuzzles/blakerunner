@@ -81,3 +81,29 @@ blocks, signed scores). Everything except the block clock is a Nostr event.
 
 The lounge (`app.js`) also accepts NIP-46 bunker login; bunker and NIP-07 users can chat and see
 their derived BLAKE2b wallet, but zaps/sends need a browser-held key.
+
+## Tests
+
+No build step — Vercel serves these files as they are, so a parse error ships straight to
+production and the game silently fails to load. `npm test` is the gate.
+
+```sh
+npm install
+npm test            # parse check + netcode invariants. no network, runs on every PR
+npm run test:relays # live: do the relays in GAME_RELAYS actually carry this game's kinds?
+```
+
+`test/netcode.test.mjs` encodes bugs that already shipped once, so a refactor can only
+reintroduce them on purpose: a subscription filter derived from the client clock (a rider whose
+clock ran fast saw an empty grid), replayed history reaching the kill/death counters, and a
+dropped subscription never recovering. Each one fails against the pre-fix `race.js`.
+
+`test/relay-contract.test.mjs` publishes with throwaway guest keys and checks both that
+each relay accepts the game's kinds and that a second guest actually receives them — an
+`OK` is a receipt, not a delivery. It is off the PR gate because it talks to third-party
+relays and does flake. Run it before changing a kind constant or the relay list: a new kind is
+gated by default on a WoT relay, so it will look fine locally and drop every guest's events in
+production.
+
+Constants are read out of `game/race.js` at test time rather than restated, so the tests
+cannot drift from the source they guard.

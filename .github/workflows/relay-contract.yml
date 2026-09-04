@@ -1,0 +1,24 @@
+name: Relay contract
+
+# Live checks against the relays the game publishes to. Deliberately NOT on the PR gate: these
+# talk to third-party relays over the network and do flake (purplerelay dropped a live fanout
+# once in three consecutive runs). A flaky required check trains people to ignore red.
+#
+# What this catches: a relay changing its write policy under you. coolfeed silently rejected 4
+# of the game's 5 kinds for a while and the game kept working only because the other relays
+# carried the traffic — invisible until someone measured it.
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  relays:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run test:relays
