@@ -4,10 +4,19 @@ import { BunkerSigner, parseBunkerInput } from 'https://esm.sh/nostr-tools@2.10.
 
 const GAME_RELAYS = ['wss://coolfeed.feeds.relay.tools', 'wss://relay.mostr.pub', 'wss://purplerelay.com', 'wss://nos.lol'];
 const PROFILE_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
-const K_TICK = 21110, K_EVT = 21111, K_SCORE = 2112, K_CLAIM = 2113, TAG = 'hodland';
+const K_TICK = 21110, K_EVT = 21111, K_SCORE = 2112, K_CLAIM = 2113, K_PRESENCE = 30078, TAG = 'hodland';
+// Rooms (Tank Arena pattern): a room is a string two people agreed on. Ticks/events carry the room tag so grids
+// stay separate; presence is an addressable kind 30078 with NIP-40 expiry so the lobby can list live grids.
+const PRESENCE_D = 'hodland/here', PRESENCE_TAG = 'hodland-live', BEACON_MS = 30000, PRESENCE_TTL_S = 120, SEATS = 8, MAX_BOTS = 7;
+const cleanRoom = r => String(r || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'lobby';
+const params = new URLSearchParams(location.search);
+const room = { name: cleanRoom(params.get('room') || localStorage.getItem('br_room') || 'lobby'), listed: params.get('private') !== '1' && localStorage.getItem('br_room_private') !== '1' };
+const roomTag = () => TAG + '-r-' + room.name;
 const MEMPOOL = '/mp';
 const COLS = 140, ROWS = 90, CELL = 22, W = COLS * CELL, H = ROWS * CELL;
-const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 6, KEY_MS = 5000, RESPAWN_MS = 2500, MAX_TAIL = 500, MIN_RIDERS = 6;
+const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 6, KEY_MS = 5000, RESPAWN_MS = 2500, MAX_TAIL = 500;
+// Drones: local practice riders. Preference lives in localStorage and the invite link; the count is what the room feels like, not a rule.
+let botsWanted = (() => { const u = params.get('bots'); const raw = u !== null ? u : localStorage.getItem('br_bots'); const n = raw === null ? 5 : Math.floor(Number(raw)); return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, n)) : 5; })(); let botsLast = botsWanted || 5;
 const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
 const PATTERNS = ['solid', 'stripes', 'dots', 'checker', 'grid'];
 const $ = id => document.getElementById(id);
@@ -105,7 +114,7 @@ function spawn(p){
 const local = mkPlayer(me.sessPub); local.hue = style.hue; local.pat = style.pat;
 let drones = [];
 const DRONE_NAMES = ['Nakamoto', 'Finney', 'Szabo', 'Back', 'Dai', 'Todd', 'Wuille', 'Maxwell'];
-function ensureDrones(){ const humans = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 6000)).length; const want = Math.max(0, MIN_RIDERS - humans); while (drones.length < want){ const i = drones.length; const d = mkPlayer('drone' + i + '0000000000000000000000000000000000000000000000000000000000', true); d.name = DRONE_NAMES[i % DRONE_NAMES.length]; d.hue = (i * 67 + 200) % 360; d.pat = i % PATTERNS.length; d.plan = []; spawn(d); drones.push(d); } while (drones.length > want){ const d = drones.pop(); clearLand(d.slot); players.delete(d.pk); } }
+function ensureDrones(){ const humans = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 6000)).length; const want = Math.max(0, botsWanted - Math.max(0, humans - 1)); while (drones.length < want){ const i = drones.length; const d = mkPlayer('drone' + i + '0000000000000000000000000000000000000000000000000000000000', true); d.name = DRONE_NAMES[i % DRONE_NAMES.length]; d.hue = (i * 67 + 200) % 360; d.pat = i % PATTERNS.length; d.plan = []; spawn(d); drones.push(d); } while (drones.length > want){ const d = drones.pop(); clearLand(d.slot); players.delete(d.pk); } }
 const label = p => p.drone ? p.name : nameOf(p.pk);
 function capture(p){
   for (const c of p.tail) owner[c] = p.slot;
@@ -125,7 +134,7 @@ function die(p, by, why){
   const killer = by && players.get(by); if (killer && killer !== p) killer.kills++;
   const who = label(p); const kn = killer ? label(killer) : null;
   feed(kn ? `${kn} wiped out ${who}` : `${who} ${why || 'wiped out'}`, p === local || by === me.sessPub ? 'kill me' : 'kill');
-  if (p === local){ $('deadBy').textContent = kn ? 'cut off by ' + kn : why; $('deadMsg').classList.remove('hidden'); setTimeout(() => $('deadMsg').classList.add('hidden'), RESPAWN_MS); if (navigator.vibrate) navigator.vibrate(120); if (net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', TAG]], content: JSON.stringify({ t: 'die', by: by || null }) })); }
+  if (p === local){ $('deadBy').textContent = kn ? 'cut off by ' + kn : why; $('deadMsg').classList.remove('hidden'); setTimeout(() => $('deadMsg').classList.add('hidden'), RESPAWN_MS); if (navigator.vibrate) navigator.vibrate(120); if (net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'die', by: by || null }) })); }
 }
 function enterCell(p, c){
   const cx = c % COLS, cy = (c - cx) / COLS;
@@ -133,7 +142,7 @@ function enterCell(p, c){
   if (p.tailSet.has(c)) return die(p, null, 'crossed their own tail');
   for (const q of players.values()){ if (q === p || !q.alive) continue; if (q.tailSet.has(c)){
       if (q === local) die(local, p.pk, '');
-      else { die(q, p.pk, ''); if (p === local && !q.drone && net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', TAG], ['p', q.pk]], content: JSON.stringify({ t: 'kill', victim: q.pk }) })); } } }
+      else { die(q, p.pk, ''); if (p === local && !q.drone && net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()], ['p', q.pk]], content: JSON.stringify({ t: 'kill', victim: q.pk }) })); } } }
   if (!p.alive) return;
   if (owner[c] === p.slot){ if (p.tail.length) capture(p); p.inside = true; }
   else { p.tail.push(c); p.tailSet.add(c); p.inside = false; if (p.tail.length > MAX_TAIL) die(p, null, 'stretched too thin'); }
@@ -171,12 +180,13 @@ function driveDrone(p){
 function rleMine(s){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < owner.length; i++){ const v = owner[i] === s ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
 function applyRle(s, str){ clearLand(s); let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < owner.length; k++) owner[i + k] = s; i += n; v ^= 1; } }
 let lastKey = 0;
-function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', TAG]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
+function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
 
 // ---------- netcode ----------
-const net = { ready: false, lastTick: 0 };
+const net = { ready: false, lastTick: 0, sub: null };
 function subscribe(){
-  pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [TAG], since: Math.floor(Date.now()/1000) - 8 }, { kinds: [K_CLAIM], '#t': [TAG], since: Math.floor(Date.now()/1000) - 86400 }], {
+  if (net.sub) { try { net.sub.close(); } catch {} } net.ready = false; $('hRelay').classList.remove('on');
+  net.sub = pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [roomTag()], since: Math.floor(Date.now()/1000) - 8 }, { kinds: [K_CLAIM], '#t': [TAG], since: Math.floor(Date.now()/1000) - 86400 }], {
     onevent: e => { if (!verifyEvent(e)) return;
       if (e.kind === K_CLAIM){ const sp = e.tags.find(t => t[0] === 'p')?.[1]; if (sp && /^[0-9a-f]{64}$/.test(sp) && sp !== me.sessPub){ claims.set(sp, e.pubkey); wantProfile(e.pubkey); } return; }
       if (e.pubkey === me.sessPub) return; let c; try { c = JSON.parse(e.content); } catch { return; }
@@ -193,8 +203,51 @@ function subscribe(){
     oneose: () => { net.ready = true; $('hRelay').classList.add('on'); } });
 }
 function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 1000 / TICK_HZ) return; net.lastTick = now();
-  pub(signAsSess({ kind: K_TICK, tags: [['t', TAG], ['h', String(chain.height)]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], tl: local.tail.slice(-MAX_TAIL) }) }));
+  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()], ['h', String(chain.height)]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], tl: local.tail.slice(-MAX_TAIL) }) }));
   sendLand(false); }
+
+// ---------- rooms: presence beacons and the live-grid list ----------
+let beaconT = null;
+async function beacon(){
+  if (!started || !me.id) return;
+  const at = Math.floor(Date.now()/1000); landCounts();
+  const payload = { room: room.name, name: (me.guest ? 'guest-' + me.sessPub.slice(0, 4) : nameOf(me.sessPub)).slice(0, 16), hue: style.hue, role: 'seat', at, block: chain.height || undefined, bots: botsWanted, land: +(local.land / (COLS * ROWS) * 100).toFixed(1) };
+  const tags = [['d', PRESENCE_D], ...(room.listed ? [['t', PRESENCE_TAG]] : []), ['t', roomTag()], ['expiration', String(at + PRESENCE_TTL_S)]];
+  try { const ev = me.guest ? signAsSess({ kind: K_PRESENCE, tags, content: JSON.stringify(payload) }) : await signAsMe({ kind: K_PRESENCE, tags, content: JSON.stringify(payload) }); pub(ev); } catch {}
+}
+function startBeacon(){ clearInterval(beaconT); beacon(); beaconT = setInterval(beacon, BEACON_MS); }
+function groupRooms(evs){
+  const rooms = new Map(); const cutoff = Math.floor(Date.now()/1000) - PRESENCE_TTL_S * 3;
+  for (const e of evs){ let p; try { p = JSON.parse(e.content); } catch { continue; } if (!p || typeof p.room !== 'string' || e.created_at < cutoff) continue; const r = cleanRoom(p.room); let occ = rooms.get(r); if (!occ) rooms.set(r, occ = new Map()); const prev = occ.get(e.pubkey); if (!prev || prev.at < e.created_at) occ.set(e.pubkey, { pk: e.pubkey, name: String(p.name || '').slice(0, 16), hue: p.hue | 0, at: e.created_at, block: p.block, bots: p.bots, land: p.land }); }
+  const out = [...rooms].map(([name, occ]) => { const riders = [...occ.values()].sort((a, b) => b.at - a.at); const bots = riders.find(r => typeof r.bots === 'number')?.bots; return { name, riders, open: Math.max(0, SEATS - riders.length), block: riders[0]?.block, bots, freshest: riders[0]?.at || 0 }; });
+  if (!out.some(r => r.name === 'lobby')) out.push({ name: 'lobby', riders: [], open: SEATS, standing: true, freshest: 0 });
+  return out.sort((a, b) => b.riders.length - a.riders.length || b.freshest - a.freshest);
+}
+async function fetchLiveRooms(){ const evs = await pool.querySync(GAME_RELAYS, { kinds: [K_PRESENCE], '#t': [PRESENCE_TAG], limit: 300 }, { maxWait: 3500 }).catch(() => []); return groupRooms(evs.filter(e => verifyEvent(e))); }
+let liveT = null;
+async function renderLive(){
+  const list = await fetchLiveRooms(); const box = $('liveRooms'); if (!box) return;
+  for (const r of list) for (const o of r.riders) wantProfile(o.pk);
+  box.innerHTML = list.slice(0, 8).map(r => { const dots = r.riders.slice(0, SEATS).map(o => `<i title="${esc(o.name || nameOf(o.pk))}" style="background:hsl(${o.hue},95%,60%)"></i>`).join(''); const bits = []; if (r.block) bits.push('block ' + Number(r.block).toLocaleString()); if (typeof r.bots === 'number') bits.push(r.bots + ' drone' + (r.bots === 1 ? '' : 's')); if (r.standing) bits.push('the standing grid · always open'); const here = r.name === room.name;
+    return `<div class="lr${here ? ' here' : ''}"><div class="lrt"><b>${esc(r.name)}</b><span class="seats ${r.open ? 'open' : 'full'}">${r.riders.length}/${SEATS}</span></div><div class="dots">${dots || '<span class="muted small">nobody riding</span>'}</div><div class="small muted">${bits.join(' · ')}</div><button class="btn ghost tiny" data-join="${esc(r.name)}">${here ? 'this grid' : r.open ? 'Join' : 'Squeeze in'}</button></div>`; }).join('');
+  box.querySelectorAll('[data-join]').forEach(b => { b.onclick = () => { setRoom(b.dataset.join); }; });
+}
+function setRoom(name, opts = {}){
+  const n = cleanRoom(name); const changed = n !== room.name; room.name = n; if (opts.listed !== undefined) room.listed = !!opts.listed;
+  localStorage.setItem('br_room', n); localStorage.setItem('br_room_private', room.listed ? '0' : '1');
+  syncRoomUI(); if (changed){ for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); } subscribe(); if (started){ feed(`moved to grid “${n}”`); sendLand(true); startBeacon(); } }
+  history.replaceState(null, '', inviteUrl().replace(location.origin, ''));
+}
+function inviteUrl(){ const u = new URL(location.origin + '/game'); if (room.name !== 'lobby') u.searchParams.set('room', room.name); if (botsWanted !== 5) u.searchParams.set('bots', String(botsWanted)); if (!room.listed) u.searchParams.set('private', '1'); return u.toString(); }
+function syncRoomUI(){ $('roomIn').value = room.name; $('hRoom').textContent = room.name; $('privToggle').classList.toggle('on', !room.listed); $('privToggle').textContent = room.listed ? 'Listed' : 'Private'; $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
+async function share(btn){
+  const url = inviteUrl(); const text = `Ride with me on HODLAND, grid “${room.name}”. Claim land on the BLAKE2b grid, rounds are blocks.`;
+  if (navigator.share && /Mobi|Android/i.test(navigator.userAgent)) { try { await navigator.share({ title: 'HODLAND', text, url }); return; } catch {} }
+  try { await navigator.clipboard.writeText(url); const old = btn.textContent; btn.textContent = 'Copied ✓'; setTimeout(() => btn.textContent = old, 1500); } catch { prompt('Copy this link', url); }
+}
+// ---------- bots (drones) stepper ----------
+function setBots(n){ botsWanted = Math.max(0, Math.min(MAX_BOTS, Math.floor(Number(n) || 0))); if (botsWanted) botsLast = botsWanted; localStorage.setItem('br_bots', String(botsWanted)); syncBotsUI(); ensureDrones(); if (started) feed(botsWanted ? `${botsWanted} drone${botsWanted === 1 ? '' : 's'} on the grid` : 'drones off'); history.replaceState(null, '', inviteUrl().replace(location.origin, '')); }
+function syncBotsUI(){ for (const id of ['botsLbl', 'botsLbl2']) $(id).textContent = botsWanted ? `Drones: ${botsWanted}` : 'Drones: off'; for (const id of ['botsLess', 'botsLess2']) $(id).disabled = botsWanted <= 0; for (const id of ['botsMore', 'botsMore2']) $(id).disabled = botsWanted >= MAX_BOTS; $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
 
 // ---------- rounds, scores, leaderboards ----------
 function landCounts(){ const n = new Uint32Array(slots.length); for (let i = 0; i < owner.length; i++) n[owner[i]]++; for (const p of players.values()) p.land = n[p.slot] || 0; }
@@ -258,7 +311,11 @@ function feed(msg, cls = ''){ const f = $('feed'); const el = document.createEle
 // ---------- input ----------
 function boost(){ if (!local.alive || now() < local.cd) return; local.boostUntil = now() + BOOST_MS; local.cd = now() + BOOST_CD; }
 function steer(nd){ if (!local.alive || (nd + 2) % 4 === local.d) return; local.nd = nd; }
-window.addEventListener('keydown', e => { if (!started) return; const k = e.key.toLowerCase(); const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } });
+window.addEventListener('keydown', e => { if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return; const k = e.key.toLowerCase();
+  if (k === 'escape'){ for (const id of ['board', 'styleBox', 'controls']) $(id).classList.add('hidden'); return; }
+  if (k === 'b'){ setBots(botsWanted ? 0 : botsLast); return; } if (k === '['){ setBots(botsWanted - 1); return; } if (k === ']'){ setBots(botsWanted + 1); return; }
+  if (k === 'c'){ $('controls').classList.toggle('hidden'); return; } if (k === 'l'){ $('board').classList.toggle('hidden'); if (!$('board').classList.contains('hidden')){ $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); career(); } return; } if (k === 'i'){ share($('btnShare')); return; }
+  if (!started) return; const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } });
 let touch = null; cv.addEventListener('pointerdown', e => { touch = { x: e.clientX, y: e.clientY, t: now() }; });
 cv.addEventListener('pointermove', e => { if (!touch || touch.done) return; const dx = e.clientX - touch.x, dy = e.clientY - touch.y; if (Math.hypot(dx, dy) > 22){ steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3)); touch.done = true; } });
 cv.addEventListener('pointerup', e => { if (!touch) return; if (!touch.done && now() - touch.t < 350) boost(); touch = null; });
@@ -276,7 +333,15 @@ $('btnBunkerShow').onclick = () => { $('bunkerRow').classList.toggle('hidden'); 
 $('btnBunker').onclick = async () => { $('btnBunker').disabled = true; err('Connecting to your signer… approve it there.'); try { await loginBunker($('bunkerIn').value); err(''); } catch (e) { err(e.message); } finally { $('btnBunker').disabled = false; } };
 $('btnGuest').onclick = () => { guest(); err(''); };
 $('btnSwitch').onclick = () => { me.id = null; $('who').classList.add('hidden'); $('rideRow').classList.add('hidden'); $('loginRow').classList.remove('hidden'); };
-$('btnRide').onclick = async () => { $('lobby').classList.add('hidden'); started = true; spawn(local); await publishClaim(); sendLand(true); };
+$('btnRide').onclick = async () => { setRoom($('roomIn').value); $('lobby').classList.add('hidden'); started = true; spawn(local); await publishClaim(); sendLand(true); startBeacon(); clearInterval(liveT); };
+$('roomIn').addEventListener('change', () => setRoom($('roomIn').value)); $('roomIn').addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); setRoom($('roomIn').value); } });
+$('privToggle').onclick = () => setRoom(room.name, { listed: !room.listed });
+$('btnNewRoom').onclick = () => { const words = ['neon', 'sat', 'blake', 'hodl', 'grid', 'block', 'rider', 'tail', 'moon', 'pink', 'cyan', 'plot']; setRoom(words[Math.floor(Math.random() * words.length)] + '-' + Math.random().toString(36).slice(2, 6)); };
+for (const [less, tog, more] of [['botsLess', 'botsLbl', 'botsMore'], ['botsLess2', 'botsLbl2', 'botsMore2']]){ $(less).onclick = () => setBots(botsWanted - 1); $(more).onclick = () => setBots(botsWanted + 1); $(tog).onclick = () => setBots(botsWanted ? 0 : botsLast); }
+$('btnShare').onclick = () => share($('btnShare')); $('btnShare2').onclick = () => share($('btnShare2')); $('btnCopyInvite').onclick = () => share($('btnCopyInvite'));
+$('btnControls').onclick = () => $('controls').classList.remove('hidden'); $('controlsClose').onclick = () => $('controls').classList.add('hidden'); $('btnControls2').onclick = () => $('controls').classList.remove('hidden');
+$('btnLeave').onclick = () => { $('lobby').classList.remove('hidden'); renderLive(); liveT = setInterval(renderLive, 15000); };
+$('liveRefresh').onclick = renderLive;
 $('btnBoard').onclick = () => { $('board').classList.remove('hidden'); $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); career(); };
 $('boardClose').onclick = () => $('board').classList.add('hidden');
 document.querySelectorAll('.tabs button').forEach(b => { b.onclick = () => { document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b)); $('boardNow').classList.toggle('hidden', b.dataset.tab !== 'now'); $('boardCareer').classList.toggle('hidden', b.dataset.tab !== 'career'); }; });
@@ -285,5 +350,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {});
-window.hodland = { local, players, owner, steer, boost, COLS, ROWS, style };
-pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); loop();
+window.hodland = { local, players, owner, steer, boost, COLS, ROWS, style, room, setRoom, setBots, inviteUrl, get bots(){ return botsWanted; } };
+syncRoomUI(); syncBotsUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
+if (params.get('room')) feed(`invited to grid “${room.name}”`);

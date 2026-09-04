@@ -41,7 +41,7 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
 .gbtns{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
 .gbtns .btn{padding:7px 11px;font-size:12.5px}
 .overlay{position:absolute;inset:0;display:grid;place-items:center;background:rgba(6,0,20,.74);backdrop-filter:blur(4px);z-index:5;overflow:auto;padding:12px}
-.overlay .box{width:min(560px,96%);text-align:center}
+.overlay .box{width:min(620px,96%);text-align:center}
 .overlay h1{font-size:46px;margin:0 0 4px;letter-spacing:.06em;font-weight:900;background:linear-gradient(92deg,var(--cyan),var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent}
 .overlay h1 img{width:52px;height:52px;vertical-align:-10px;margin-right:8px;border-radius:12px}
 .overlay p{color:var(--ink2);margin:6px 0 12px;font-size:14.5px}
@@ -66,6 +66,32 @@ input.pass,input.bunker{background:rgba(0,0,0,.35);border:1px solid var(--line2)
 .tabs button{background:transparent;border:1px solid var(--line2);color:var(--ink2);padding:6px 12px;border-radius:999px;cursor:pointer;font-weight:700;font-size:13px}
 .tabs button.on{background:var(--pink);color:#12042a;border-color:var(--pink)}
 .close2{position:absolute;top:10px;right:14px;background:none;border:0;color:var(--muted);font-size:26px;cursor:pointer}
+.btn.tiny{padding:5px 10px;font-size:12px}
+.roomrow{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;margin:10px 0 4px}
+.roomrow label{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;padding:8px 12px;border-radius:10px;font-size:15px;outline:none;width:160px;font-family:var(--mono);text-transform:lowercase}
+.tog{background:transparent;border:1px solid var(--line2);color:var(--ink2);padding:7px 12px;border-radius:999px;cursor:pointer;font-weight:700;font-size:12.5px}
+.tog.on{background:var(--pink);color:#12042a;border-color:var(--pink)}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--line2);border-radius:999px;overflow:hidden;background:rgba(0,0,0,.25)}
+.stepper button{background:transparent;border:0;color:#fff;padding:7px 12px;cursor:pointer;font-weight:700;font-size:13px;font-family:inherit}
+.stepper button:disabled{opacity:.35;cursor:default}.stepper button.lbl{border-left:1px solid var(--line2);border-right:1px solid var(--line2);min-width:110px;font-family:var(--mono);font-size:12.5px}
+.invite{font-family:var(--mono);font-size:12px;color:var(--cyan);word-break:break-all;margin:6px 0 0}
+.live{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin:10px 0 6px;text-align:left}
+.lr{background:rgba(0,0,0,.3);border:1px solid var(--line2);border-radius:12px;padding:9px 11px;display:flex;flex-direction:column;gap:5px}
+.lr.here{border-color:var(--cyan);box-shadow:0 0 18px rgba(0,229,255,.25)}
+.lr .lrt{display:flex;align-items:center;gap:8px}.lr .lrt b{font-family:var(--mono);font-size:14px;overflow:hidden;text-overflow:ellipsis}
+.lr .seats{margin-left:auto;font-family:var(--mono);font-size:11.5px;padding:2px 7px;border-radius:999px;border:1px solid var(--line2)}
+.lr .seats.open{color:var(--green)}.lr .seats.full{color:var(--pink)}
+.lr .dots{display:flex;gap:4px;min-height:12px;flex-wrap:wrap}.lr .dots i{width:12px;height:12px;border-radius:50%;display:inline-block;box-shadow:0 0 8px currentColor}
+.lr .btn{align-self:flex-start;margin:2px 0 0}
+.secth{display:flex;align-items:center;gap:8px;margin:14px 0 0;justify-content:center}.secth h2{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:800}
+.keys{display:grid;grid-template-columns:1fr 1fr;gap:14px;text-align:left;margin:8px 0}
+.keys h3{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);margin:0 0 6px}
+.keys table{width:100%;border-collapse:collapse;font-size:13px}.keys td{padding:4px 6px;border-bottom:1px solid rgba(255,255,255,.06);color:var(--ink2)}
+.keys td:first-child{width:40%}.keys kbd{font-family:var(--mono);background:rgba(255,255,255,.1);border:1px solid var(--line2);border-radius:6px;padding:1px 7px;font-size:12px;color:#fff;white-space:nowrap}
+.tip b{color:#fff;font-family:var(--mono)}.tip span{margin-right:10px}
+.gbtns .stepper button{padding:5px 9px;font-size:11.5px}.gbtns .stepper button.lbl{min-width:90px}
+@media (max-width:760px){.keys{grid-template-columns:1fr}.live{grid-template-columns:1fr 1fr}.gbtns .stepper{display:none}}
 @media (max-width:760px){.feed{top:auto;bottom:calc(34px + env(safe-area-inset-bottom));width:min(70%,360px);left:8px;transform:none;align-items:flex-start}.feed div{font-size:12px;padding:4px 10px}.gtop{padding:6px 10px}.gtop .brand{font-size:18px}.gtop .brand em{display:none}.gtop a.l{display:none}.gtop .block{font-size:11px;gap:8px}
  #wrap{margin:0 6px 6px;height:calc(100dvh - 50px)}.hud{gap:3px}.hud .row{font-size:11px;padding:3px 7px}.hud .row:nth-child(n+4){display:none}.tip{display:none}.overlay h1{font-size:34px}.gbtns .btn{padding:6px 9px;font-size:11.5px}}
 </style>
@@ -75,15 +101,22 @@ input.pass,input.bunker{background:rgba(0,0,0,.35);border:1px solid var(--line2)
 <header class="gtop">
   <a class="brand" href="/"><img src="/game/logo.svg" alt="">HODL<span>AND</span></a>
   <a class="l" href="/">← lounge</a>
-  <div class="block"><span>blk <b id="hBlock">…</b></span><span>next <b id="hClock">…</b></span><span><b id="hRiders">0</b> riders</span><span id="hRelay" class="dot"></span></div>
+  <div class="block"><span>grid <b id="hRoom" style="color:var(--cyan)">lobby</b></span><span>blk <b id="hBlock">…</b></span><span>next <b id="hClock">…</b></span><span><b id="hRiders">0</b> riders</span><span id="hRelay" class="dot"></span></div>
 </header>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div class="hud" id="hud"></div>
   <div class="feed" id="feed"></div>
-  <div class="gbtns"><button id="btnBoard" class="btn ghost">Leaderboard</button><button id="btnStyle" class="btn ghost">My colors</button></div>
+  <div class="gbtns">
+    <button id="btnBoard" class="btn ghost" title="Leaderboard (L)">Leaderboard</button>
+    <button id="btnStyle" class="btn ghost">My colors</button>
+    <span class="stepper" title="Drones on the grid (B toggles, [ ] steps)"><button id="botsLess2" aria-label="One fewer drone">−</button><button id="botsLbl2" class="lbl">Drones: 5</button><button id="botsMore2" aria-label="One more drone">+</button></span>
+    <button id="btnShare2" class="btn ghost" title="Copy invite link (I)">Share grid</button>
+    <button id="btnControls2" class="btn ghost" title="Controls (C)">Controls</button>
+    <button id="btnLeave" class="btn ghost">Lobby</button>
+  </div>
   <div class="boost"><i id="boostBar"></i></div>
-  <div class="tip">← ↑ → ↓ / WASD steer · space boost · swipe + tap on phone · get home to claim</div>
+  <div class="tip"><span><b>WASD / ←↑→↓</b> steer</span><span><b>space</b> boost</span><span><b>B</b> drones</span><span><b>[ ]</b> fewer / more</span><span><b>I</b> invite</span><span><b>C</b> controls</span><span><b>L</b> board</span></div>
   <div id="deadMsg" class="dead hidden"><div>WIPED OUT<small id="deadBy"></small></div></div>
 
   <div id="lobby" class="overlay"><div class="box">
@@ -103,6 +136,24 @@ input.pass,input.bunker{background:rgba(0,0,0,.35);border:1px solid var(--line2)
       <button id="btnRide" class="btn zap">Ride →</button><button id="btnSwitch" class="link">switch rider</button>
     </div>
     <div id="lobbyErr" class="err"></div>
+
+    <div class="secth"><h2>Grid</h2></div>
+    <div class="roomrow">
+      <label for="roomIn">room</label><input id="roomIn" class="room" maxlength="24" placeholder="lobby" autocomplete="off" spellcheck="false">
+      <button id="btnNewRoom" class="btn ghost tiny" title="Make a fresh room name">New</button>
+      <button id="privToggle" class="tog" title="Private: never listed under live grids; the room name is the secret">Listed</button>
+    </div>
+    <div class="roomrow">
+      <span class="stepper" title="Local practice riders. They leave one by one as real riders arrive."><button id="botsLess" aria-label="One fewer drone">−</button><button id="botsLbl" class="lbl">Drones: 5</button><button id="botsMore" aria-label="One more drone">+</button></span>
+      <button id="btnShare" class="btn ghost tiny">Share invite link</button>
+      <button id="btnControls" class="btn ghost tiny">Controls</button>
+    </div>
+    <div class="invite"><span id="inviteUrl"></span> <button id="btnCopyInvite" class="link" style="font-size:12px">copy</button></div>
+    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the drone count and whether it is listed. Everyone on the same room tag sees each other.</p>
+
+    <div class="secth"><h2>Live grids</h2><button id="liveRefresh" class="link" style="font-size:12px">refresh</button></div>
+    <div id="liveRooms" class="live"><div class="sys">Asking the relays who is riding…</div></div>
+    <p class="muted small">Every card is what riders said about themselves in a signed presence beacon that expires in two minutes. Nothing here is enforced: eight seats is a courtesy, not a rule.</p>
     <div id="lastPodium" class="podium"></div>
   </div></div>
 
@@ -120,6 +171,37 @@ input.pass,input.bunker{background:rgba(0,0,0,.35);border:1px solid var(--line2)
     <div id="boardNow" class="podium"></div>
     <div id="boardCareer" class="podium hidden"><div class="sys">Loading signed rounds from relays…</div></div>
     <p class="muted small">Every row is a kind 2112 event signed by that rider's npub. Tap a rider for their profile and BLAKE2b wallet.</p>
+  </div></div>
+
+  <div id="controls" class="overlay hidden"><div class="box" style="position:relative">
+    <button class="close2" id="controlsClose">×</button>
+    <h1 style="font-size:30px">Controls</h1>
+    <div class="keys">
+      <div><h3>Riding</h3><table>
+        <tr><td><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>steer (no U-turns: you cannot reverse into your own tail)</td></tr>
+        <tr><td><kbd>↑</kbd> <kbd>←</kbd> <kbd>↓</kbd> <kbd>→</kbd></td><td>steer, same as WASD</td></tr>
+        <tr><td><kbd>space</kbd></td><td>boost 0.8 s, 3.5 s cooldown (bar at the bottom)</td></tr>
+      </table></div>
+      <div><h3>Phone</h3><table>
+        <tr><td>swipe</td><td>steer in the swipe direction</td></tr>
+        <tr><td>tap</td><td>boost</td></tr>
+        <tr><td>home screen</td><td>installable as an app (standalone PWA)</td></tr>
+      </table></div>
+      <div><h3>Grid</h3><table>
+        <tr><td><kbd>B</kbd></td><td>drones on / off</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>one fewer / one more drone (0–7)</td></tr>
+        <tr><td><kbd>I</kbd></td><td>copy the invite link for this grid</td></tr>
+        <tr><td><kbd>L</kbd></td><td>leaderboard</td></tr>
+        <tr><td><kbd>C</kbd></td><td>this panel</td></tr>
+        <tr><td><kbd>esc</kbd></td><td>close any panel</td></tr>
+      </table></div>
+      <div><h3>How to win</h3><table>
+        <tr><td>claim</td><td>leave your land, loop back in; the tail and everything it encloses is yours</td></tr>
+        <tr><td>cut</td><td>cross a rider's tail while they are out and they lose everything</td></tr>
+        <tr><td>die</td><td>touch your own tail, the edge, or stretch a tail past 500 cells</td></tr>
+        <tr><td>round</td><td>one BLAKE2b block; most land when the next block lands wins</td></tr>
+      </table></div>
+    </div>
   </div></div>
 
   <div id="styleBox" class="overlay hidden"><div class="box" style="position:relative">

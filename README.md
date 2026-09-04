@@ -49,7 +49,7 @@ blocks, signed scores). Everything except the block clock is a Nostr event.
 - **Play**: 140×90 grid. Start on a 3×3 plot; leaving draws a tail; re-entering your land claims
   the tail plus everything enclosed (border flood fill). Crossing a tail wipes its owner out.
   Edge or own tail wipes you out. Boost 0.8 s / 3.5 s cooldown. Standings by land %, kills break
-  ties. Up to six local drones fill the grid when fewer than six humans are riding.
+  ties. Local drones fill the grid (see Grids and Drones below).
 - **Riders**: kind 0 picture drawn as the head inside a colored ring; land color (hue) and pattern
   (solid / stripes / dots / checker / grid) chosen in "My colors", saved in localStorage, sent in
   every tick. Wipe-outs burst particles; claims ripple a ring; a notification feed announces kills,
@@ -61,11 +61,22 @@ blocks, signed scores). Everything except the block clock is a Nostr event.
   (`#t hodland-<height>`, `d` = height, content land/cells/kills/deaths). Leaderboard "This block"
   is live standings; "All time" aggregates kind 2112 events (block wins, rounds, best %, kills).
   Rows link to `/p/<npub>` where the rider's BLAKE2b wallet is shown.
+- **Grids (rooms)**: a room is a string two riders agreed on (Tank Arena pattern). Ticks and events
+  carry `#t hodland-r-<room>` so grids stay separate; session claims and signed scores stay global.
+  Every rider publishes a presence beacon (kind 30078, `d` = `hodland/here`, `#t hodland-live`,
+  NIP-40 `expiration` 120 s, republished every 30 s, signed by the npub or the guest session key)
+  and the lobby lists **Live grids** with riders, block, drone count and a Join button. "Private"
+  keeps the beacon off the live index; the room name is the secret. Eight seats is a courtesy.
+- **Drones (bots)**: 0–7 local practice riders, stepper in the lobby and in-game, `B` toggles,
+  `[` / `]` step. They leave one at a time as real riders arrive. Saved in localStorage.
+- **Share**: invite link `/game?room=<name>&bots=<n>&private=1` (only non-default parts are
+  written). "Share grid" uses the native share sheet on phones, the clipboard elsewhere; `I` copies.
+- **Controls panel** (`C`): keyboard, phone, grid hotkeys and the rules. `L` leaderboard, `Esc` closes.
 - **Login**: lounge login carried over (local key, NIP-07 or bunker), NIP-07, NIP-46 bunker
   (`bunker://` or `name@nsec.app`, client key kept in localStorage), or guest.
 - **Mobile**: swipe to steer, tap to boost, compact HUD, installable PWA (standalone, icons).
 - Hidden tabs keep simulating on a timer with sub-stepping, so alt-tabbed riders stay live.
-- Debug handle: `window.hodland`.
+- Debug handle: `window.hodland` (`room`, `setRoom`, `setBots`, `inviteUrl`).
 
 The lounge (`app.js`) also accepts NIP-46 bunker login; bunker and NIP-07 users can chat and see
 their derived BLAKE2b wallet, but zaps/sends need a browser-held key.
