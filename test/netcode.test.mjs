@@ -2,10 +2,10 @@
 // refactor can reintroduce them only on purpose. No network — these run on every PR.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { race, GAME_RELAYS, PROFILE_RELAYS, KINDS, published, isEphemeral } from './source.mjs';
+import { race, GAME_RELAYS, PROFILE_RELAYS, SCORE_RELAYS, KINDS, published, isEphemeral } from './source.mjs';
 
 test('every game relay is a wss:// url', () => {
-  for (const url of [...GAME_RELAYS, ...PROFILE_RELAYS]) {
+  for (const url of [...GAME_RELAYS, ...SCORE_RELAYS, ...PROFILE_RELAYS]) {
     assert.match(url, /^wss:\/\//, `${url} must be wss://`);
   }
 });
@@ -51,12 +51,24 @@ test('replayed history cannot reach the kill/death counters', () => {
   // fresh join. Without this guard those die/kill events are applied as live and inflate K/D.
   const guard = race.indexOf('if (!net.ready) return;');
   const killCounter = race.indexOf('local.kills++');
-  const claimBranch = race.indexOf("if (e.kind === K_CLAIM)");
   assert.ok(guard > -1, 'the pre-EOSE guard is missing from onevent');
   assert.ok(killCounter > -1, 'could not find the kill counter');
   assert.ok(guard < killCounter, 'the pre-EOSE guard must sit upstream of the kill counter');
-  assert.ok(claimBranch > -1 && claimBranch < guard,
-    'the guard must sit after the K_CLAIM branch so historical claims still resolve pre-EOSE');
+});
+
+test('session claims are not gated by the gameplay EOSE', () => {
+  // Claims map a session key to an npub, which is what display names resolve through. They are
+  // stored history and must land regardless of the live plane's readiness — so they get their
+  // own subscription rather than sharing the guarded gameplay handler.
+  const claimSub = race.match(/net\.claimSub = pool\.subscribeMany\(([A-Z_]+), \[([\s\S]*?)\], \{([\s\S]*?)\n  \}\);/);
+  assert.ok(claimSub, 'claims should have their own subscription');
+  assert.equal(claimSub[1], 'SCORE_RELAYS',
+    'claims must be read from the relays they are written to, or names silently stop resolving');
+  assert.match(claimSub[2], /K_CLAIM/, 'the claim subscription should filter on K_CLAIM');
+  assert.doesNotMatch(claimSub[3], /net\.ready/,
+    'the claim handler must not be gated by the gameplay EOSE');
+  assert.doesNotMatch(claimSub[2], /Date\.now\(\)/,
+    'the claim filter must not derive a bound from the client clock either');
 });
 
 test('a dropped subscription is recovered', () => {
@@ -70,4 +82,14 @@ test('every published kind is declared as a constant', () => {
   assert.ok(published.length >= 5, `expected the game's published kinds, found ${published.length}`);
   assert.doesNotMatch(race, /kind:\s*\d{3,}/,
     'publish with a named K_* constant, not a bare kind number');
+});
+
+test('the kill/death display survives a relay refactor', () => {
+  // Added after a relay change was very nearly landed on top of a stale copy of race.js, which
+  // would have silently reverted the K/D feature. The netcode guards all stayed green because
+  // none of them looked at scoring, so this is the cheap tripwire for that whole class.
+  assert.match(race, /const kd = /, 'the K/D ratio helper is missing');
+  assert.match(race, /deaths: c\.deaths \| 0/, 'fetchScores must keep reading deaths off the score');
+  assert.ok(race.includes('☠'), 'the deaths glyph is missing from the boards');
+  assert.match(race, /a\.deaths \+= r\.deaths/, 'the all-time board must keep aggregating deaths');
 });

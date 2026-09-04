@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
-import { GAME_RELAYS, published, isEphemeral, isAddressable } from './source.mjs';
+import { GAME_RELAYS, SCORE_RELAYS, published, isEphemeral, isAddressable } from './source.mjs';
 
 const TIMEOUT = 45_000;
 
@@ -32,8 +32,9 @@ const mkEvent = (sk, kind, tags = []) => finalizeEvent({
 // The gameplay plane is what a guest needs to ride at all: ticks, events, presence. If any
 // relay in the list refuses one of these, riders on that relay see a dead grid.
 const GAMEPLAY = published.filter(([, k]) => isEphemeral(k) || k === 30078);
-// Scoring kinds are deliberately gated on some relays while the score protocol is undecided,
-// so per-relay refusal is policy, not breakage. What must hold is that scores land somewhere.
+// Scoring kinds go to SCORE_RELAYS, not the realtime list: coolfeed gates 2112/2113 by design
+// while the score protocol is undecided. Per-relay refusal is policy; what must hold is that a
+// score lands somewhere, or the leaderboard stops recording silently.
 const SCORING = published.filter(([, k]) => !GAMEPLAY.some(([, g]) => g === k));
 
 const publishAll = async (url, kinds) => {
@@ -112,7 +113,7 @@ test('a guest score lands on at least one relay', { timeout: TIMEOUT * 2 }, asyn
   // Per-relay gating of the scoring kinds is a deliberate policy call. What would be a real
   // break is every relay refusing them: the leaderboard would stop recording, silently.
   const landed = new Map(SCORING.map(([n, k]) => [`${n} (${k})`, []]));
-  for (const url of GAME_RELAYS) {
+  for (const url of SCORE_RELAYS) {
     for (const r of await publishAll(url, SCORING)) {
       if (r.ok) landed.get(r.label)?.push(url);
     }
@@ -122,7 +123,7 @@ test('a guest score lands on at least one relay', { timeout: TIMEOUT * 2 }, asyn
   }
   const orphaned = [...landed].filter(([, r]) => !r.length).map(([l]) => l);
   assert.deepEqual(orphaned, [],
-    `no relay in GAME_RELAYS accepts ${orphaned.join(', ')} — scores are being silently dropped`);
+    `no relay in SCORE_RELAYS accepts ${orphaned.join(', ')} — scores are being silently dropped`);
 });
 
 test('guest identity is disposable, so nothing stored may be unbounded', () => {

@@ -2,16 +2,42 @@
 import { SimplePool, finalizeEvent, generateSecretKey, getPublicKey, nip19, verifyEvent } from 'https://esm.sh/nostr-tools@2.10.4';
 import { BunkerSigner, parseBunkerInput } from 'https://esm.sh/nostr-tools@2.10.4/nip46';
 
-// nos.lol dropped: it demands 28 bits of PoW on every kind and we mine none, so every publish
-// there is rejected and the socket only costs us connect time.
-const GAME_RELAYS = ['wss://coolfeed.feeds.relay.tools', 'wss://relay.mostr.pub', 'wss://purplerelay.com'];
+const params = new URLSearchParams(location.search);
+// One fast relay beats three. The pool takes the first copy of an event to arrive, so extra
+// relays never make a tick land sooner — but `oneose` fires only once EVERY relay has answered,
+// and nothing moves until it does, so each join and grid change paid the slowest relay's
+// latency. Measured, median of 7 from one host:
+//
+//   coolfeed      63ms to EOSE       65ms peer round-trip
+//   relay.mostr  137ms              221ms
+//   purplerelay  876ms (2.9s worst) 474ms (1.1s worst)
+//
+// Three relays made joining ~14x slower than one and bought no tick speed, only redundancy.
+// That is the trade being made here: one relay is also a single point of failure, so the list
+// is overridable — ?relays=wss://a,wss://b is remembered, ?relays=default forgets it again.
+// nos.lol is not a candidate: it demands 28 bits of PoW on every kind and we mine none.
+const DEFAULT_GAME_RELAYS = ['wss://coolfeed.feeds.relay.tools'];
+const GAME_RELAYS = (() => {
+  const raw = params.get('relays');
+  if (raw === 'default') { localStorage.removeItem('br_relays'); return DEFAULT_GAME_RELAYS; }
+  const wanted = [...new Set((raw ?? localStorage.getItem('br_relays') ?? '').split(',')
+    .map(s => s.trim()).filter(s => /^wss:\/\/[^\s,]+$/.test(s)))].slice(0, 8);
+  if (!wanted.length) return DEFAULT_GAME_RELAYS;
+  if (raw) localStorage.setItem('br_relays', wanted.join(','));
+  return wanted;
+})();
+// Scores and session claims are stored kinds written once per block: reach matters for them,
+// latency does not, so they do not belong on the realtime list. They need their own set because
+// coolfeed's write gate refuses 2112/2113 by design while the score protocol is undecided —
+// pointing everything at coolfeed alone would silently stop the leaderboard recording. Fold
+// coolfeed in here once those kinds are exempt or migrated to a blakerunner-specific kind.
+const SCORE_RELAYS = ['wss://relay.mostr.pub', 'wss://purplerelay.com'];
 const PROFILE_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
 const K_TICK = 21110, K_EVT = 21111, K_SCORE = 2112, K_CLAIM = 2113, K_PRESENCE = 30078, TAG = 'hodland';
 // Rooms (Tank Arena pattern): a room is a string two people agreed on. Ticks/events carry the room tag so grids
 // stay separate; presence is an addressable kind 30078 with NIP-40 expiry so the lobby can list live grids.
 const PRESENCE_D = 'hodland/here', PRESENCE_TAG = 'hodland-live', BEACON_MS = 30000, PRESENCE_TTL_S = 120, SEATS = 8, MAX_BOTS = 7;
 const cleanRoom = r => String(r || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'lobby';
-const params = new URLSearchParams(location.search);
 const room = { name: cleanRoom(params.get('room') || localStorage.getItem('br_room') || 'lobby'), listed: params.get('private') !== '1' && localStorage.getItem('br_room_private') !== '1' };
 const roomTag = () => TAG + '-r-' + room.name;
 const MEMPOOL = '/mp';
@@ -66,7 +92,8 @@ function setIdentity(pk, sk){ me.id = pk; me.sk = sk; me.guest = false; claims.s
 function guest(){ me.id = me.sessPub; me.sk = me.sess; me.guest = true; me.nip07 = false; me.bunker = null; claims.delete(me.sessPub); showWho(); }
 function showWho(){ if (!me.id) return; $('who').classList.remove('hidden'); $('whoPic').src = picOf(me.sessPub); $('whoName').textContent = me.guest ? 'guest rider ' + me.sessPub.slice(0, 6) : nameOf(me.sessPub) + ' · ' + nip19.npubEncode(me.id).slice(0, 14) + '…' + (me.bunker ? ' · bunker' : me.nip07 ? ' · NIP-07' : ''); $('loginRow').classList.add('hidden'); $('rideRow').classList.remove('hidden'); }
 const pub = ev => { for (const p of pool.publish(GAME_RELAYS, ev)) p.catch(() => {}); };
-async function publishClaim(){ if (me.guest) return; try { pub(await signAsMe({ kind: K_CLAIM, tags: [['t', TAG], ['p', me.sessPub]], content: me.sessPub })); } catch (e) { feed('Could not sign the session claim: ' + e.message, 'kill'); } }
+const pubScore = ev => { for (const p of pool.publish(SCORE_RELAYS, ev)) p.catch(() => {}); };
+async function publishClaim(){ if (me.guest) return; try { pubScore(await signAsMe({ kind: K_CLAIM, tags: [['t', TAG], ['p', me.sessPub]], content: me.sessPub })); } catch (e) { feed('Could not sign the session claim: ' + e.message, 'kill'); } }
 
 // ---------- style (land color + pattern) ----------
 const style = Object.assign({ hue: parseInt(me.sessPub.slice(0, 4), 16) % 360, pat: 0 }, JSON.parse(localStorage.getItem('br_style') || '{}'));
@@ -185,9 +212,9 @@ let lastKey = 0;
 function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
 
 // ---------- netcode ----------
-const net = { ready: false, lastTick: 0, sub: null, gen: 0, retry: null };
+const net = { ready: false, lastTick: 0, sub: null, claimSub: null, gen: 0, retry: null };
 function subscribe(){
-  if (net.sub) { try { net.sub.close(); } catch {} } net.ready = false; $('hRelay').classList.remove('on');
+  if (net.sub) { try { net.sub.close(); } catch {} } if (net.claimSub) { try { net.claimSub.close(); } catch {} } net.ready = false; $('hRelay').classList.remove('on');
   clearTimeout(net.retry); const gen = ++net.gen;
   // Ticks and events are live-only: `limit: 0` instead of a `since`. A client-clock `since` is a
   // trapdoor — a player whose clock runs fast stamps future timestamps but filters on its own
@@ -195,9 +222,16 @@ function subscribe(){
   // empty. No error, EOSE still fires. `limit: 0` asks the same question without a clock: strfry
   // (mostr, purplerelay) stores ephemeral kinds for ~5min and replays them without it, newlay
   // (coolfeed) never stores them at all, and all three honour it.
-  net.sub = pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [roomTag()], limit: 0 }, { kinds: [K_CLAIM], '#t': [TAG], since: Math.floor(Date.now()/1000) - 86400 }], {
+  // Claims live with the scores, so they are read from the relays they are written to. Their own
+  // subscription: a claim is a stored lookup (session key -> npub, for display names) and must
+  // not gate, or be gated by, the gameplay plane.
+  net.claimSub = pool.subscribeMany(SCORE_RELAYS, [{ kinds: [K_CLAIM], '#t': [TAG], limit: 500 }], {
     onevent: e => { if (!verifyEvent(e)) return;
-      if (e.kind === K_CLAIM){ const sp = e.tags.find(t => t[0] === 'p')?.[1]; if (sp && /^[0-9a-f]{64}$/.test(sp) && sp !== me.sessPub){ claims.set(sp, e.pubkey); wantProfile(e.pubkey); } return; }
+      const sp = e.tags.find(t => t[0] === 'p')?.[1];
+      if (sp && /^[0-9a-f]{64}$/.test(sp) && sp !== me.sessPub){ claims.set(sp, e.pubkey); wantProfile(e.pubkey); } },
+  });
+  net.sub = pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [roomTag()], limit: 0 }], {
+    onevent: e => { if (!verifyEvent(e)) return;
       // Belt and braces for a relay that ignores `limit: 0`: anything before EOSE is stored
       // history, and a replayed shot or death would be applied as if it just happened.
       if (!net.ready) return;
@@ -275,10 +309,10 @@ const rowHTML = (p, i) => { const href = p.drone ? null : npubLink(p.pk); return
 async function roundOver(prevHeight){
   const rows = standings(); $('podBlock').textContent = prevHeight.toLocaleString(); $('podList').innerHTML = rows.slice(0, 8).map(rowHTML).join('') || '<div class="sys">Nobody rode this block.</div>'; $('podium').classList.remove('hidden');
   if (rows[0]) feed(`block ${prevHeight.toLocaleString()} goes to ${label(rows[0])} with ${pct(rows[0])}`, 'claim');
-  if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b' }) }); await Promise.any(pool.publish(GAME_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
+  if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
   setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); for (const p of players.values()){ p.kills = 0; p.deaths = 0; if (p === local ? started : true) spawn(p); } }, 7000);
 }
-async function fetchScores(limit = 500){ const evs = await pool.querySync(GAME_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]); if (!h || seen.has(e.pubkey + h)) continue; seen.add(e.pubkey + h); let c = {}; try { c = JSON.parse(e.content); } catch {} rows.push({ pk: e.pubkey, h, land: c.land | 0, cells: c.cells || COLS * ROWS, kills: c.kills | 0, deaths: c.deaths | 0 }); } return rows; }
+async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]); if (!h || seen.has(e.pubkey + h)) continue; seen.add(e.pubkey + h); let c = {}; try { c = JSON.parse(e.content); } catch {} rows.push({ pk: e.pubkey, h, land: c.land | 0, cells: c.cells || COLS * ROWS, kills: c.kills | 0, deaths: c.deaths | 0 }); } return rows; }
 async function lastPodium(){ const rows = await fetchScores(80); if (!rows.length) return; const top = Math.max(...rows.map(r => r.h)); const rr = rows.filter(r => r.h === top).sort((a, b) => b.land - a.land); for (const r of rr) wantProfile(r.pk); $('lastPodium').innerHTML = `<div class="muted small" style="text-align:center">Last signed round · block ${top.toLocaleString()}</div>` + rr.slice(0, 5).map((r, i) => `<a class="p" href="/p/${nip19.npubEncode(r.pk)}" target="_blank" rel="noopener"><span class="mono muted">${i + 1}</span><img src="${picOf(r.pk)}" alt=""><span>${esc(nameOf(r.pk))}</span><b>${(r.land / r.cells * 100).toFixed(1)}%</b></a>`).join(''); }
 async function career(){
   const rows = await fetchScores(500); if (!rows.length){ $('boardCareer').innerHTML = '<div class="sys">No signed rounds on the relays yet. Be the first.</div>'; return; }
