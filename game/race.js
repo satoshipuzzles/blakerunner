@@ -43,14 +43,37 @@ const room = { name: cleanRoom(params.get('room') || localStorage.getItem('br_ro
 // Combat is a property of the grid, not the rider: it is baked into the room tag, so a classic
 // rider and a combat rider on the same room name are on different tags and never see each other.
 // Chosen in the lobby before riding, carried by the invite link.
-const mode = { combat: (params.get('mode') || localStorage.getItem('br_mode')) === 'combat' };
-const roomTag = () => TAG + '-r-' + room.name + (mode.combat ? '-combat' : '');
+const modeRaw = params.get('mode') || localStorage.getItem('br_mode');
+const mode = { combat: modeRaw === 'combat', rampart: modeRaw === 'rampart' };
+const roomTag = () => TAG + '-r-' + room.name + (mode.combat ? '-combat' : mode.rampart ? '-rampart' : '');
 const MEMPOOL = '/mp';
 const COLS = 140, ROWS = 90, CELL = 22, W = COLS * CELL, H = ROWS * CELL;
 const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 10, KEY_MS = 5000, RESPAWN_MS = 2500, MAX_TAIL = 500;
 // Combat bolts: ~3x rider speed so they are dodgeable at range and lethal up close, range capped
 // so a bolt is a duel, not cross-map artillery. The cooldown keeps land-claiming the core game.
 const BOLT_SPEED = 22, BOLT_RANGE = 20, BOLT_HIT_R = .7, FIRE_CD_MS = 2500;
+// Rampart: a build -> fortify -> bombard cycle on a fixed wall-clock, so every client derives the
+// same phase from Date.now() with no server and no coordinating event. A few seconds of clock skew
+// only shifts a peer's transition by that much, and the phase never gates a collision — the
+// worst case is one client scorching a cell a second before another. secs sum to RAMPART_PERIOD.
+const RAMPART_PHASES = [
+  { key: 'build',   label: '🏗️ BUILD',   secs: 75, hint: 'ride and claim — fortify soon' },
+  { key: 'fortify', label: '🎯 FORTIFY', secs: 18, hint: 'tap your land to place cannons' },
+  { key: 'bombard', label: '💥 BOMBARD', secs: 18, hint: 'tap enemy land to bombard it' },
+];
+const RAMPART_PERIOD = RAMPART_PHASES.reduce((s, p) => s + p.secs, 0);
+// A cannon per ~2% of the grid held at fortify, capped; the blast is a small disk of scorched
+// earth that clears its owner and can never be re-claimed until the block resets the board.
+const CANNON_PER_CELLS = 250, MAX_CANNONS = 12, BLAST_R = 3.2, SHELL_MS = 620;
+// The current phase is a pure function of the wall clock: floor the epoch seconds into the
+// repeating period and walk the table. `left` is seconds remaining in this phase.
+function rampartPhase(){
+  const t = Math.floor(Date.now() / 1000) % RAMPART_PERIOD;
+  let acc = 0;
+  for (const ph of RAMPART_PHASES){ if (t < acc + ph.secs) return { ...ph, left: acc + ph.secs - t }; acc += ph.secs; }
+  return { ...RAMPART_PHASES[0], left: 0 };
+}
+const rampTactical = () => mode.rampart && started && rampartPhase().key !== 'build';
 // Drones: local practice riders. Preference lives in localStorage and the invite link; the count is what the room feels like, not a rule.
 let botsWanted = (() => { const u = params.get('bots'); const raw = u !== null ? u : localStorage.getItem('br_bots'); const n = raw === null ? 5 : Math.floor(Number(raw)); return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, n)) : 5; })(); let botsLast = botsWanted || 5;
 const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
@@ -144,15 +167,19 @@ setInterval(() => { if (!chain.time) return; const s = Math.max(0, 600 - (Date.n
 
 // ---------- world ----------
 const owner = new Uint8Array(COLS * ROWS);
+// Rampart scorched earth: a cell marked here is a crater — its owner is cleared and it can never
+// be re-owned until the block resets the board. Global, and applied identically on every client
+// from the same 'boom' events, so no rider's land keyframe can quietly un-scorch it.
+const scorched = new Uint8Array(COLS * ROWS);
 const slots = [null]; const slotOf = new Map();
 function slot(pk){ if (slotOf.has(pk)) return slotOf.get(pk); const s = slots.length; slots.push(pk); slotOf.set(pk, s); return s; }
 const players = new Map(); let started = false;
-function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, fireCd: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0 }; players.set(pk, p); return p; }
+function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, fireCd: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0, cannons: [] }; players.set(pk, p); return p; }
 function clearLand(s){ for (let i = 0; i < owner.length; i++) if (owner[i] === s) owner[i] = 0; }
 function spawn(p){
   clearLand(p.slot); p.tail = []; p.tailSet = new Set(); p.alive = true; p.boostUntil = 0;
-  for (let tries = 0; tries < 300; tries++){ const cx = 5 + Math.floor(Math.random() * (COLS - 10)), cy = 5 + Math.floor(Math.random() * (ROWS - 10)); let free = true; for (let y = -4; y <= 4 && free; y++) for (let x = -4; x <= 4; x++) if (owner[idx(cx + x, cy + y)]){ free = false; break; }
-    if (free || tries === 299){ for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) owner[idx(cx + x, cy + y)] = p.slot; p.x = cx + .5; p.y = cy + .5; p.cell = idx(cx, cy); p.d = p.nd = Math.floor(Math.random() * 4); p.inside = true; return; } }
+  for (let tries = 0; tries < 300; tries++){ const cx = 5 + Math.floor(Math.random() * (COLS - 10)), cy = 5 + Math.floor(Math.random() * (ROWS - 10)); let free = true; for (let y = -4; y <= 4 && free; y++) for (let x = -4; x <= 4; x++){ const j = idx(cx + x, cy + y); if (owner[j] || scorched[j]){ free = false; break; } }
+    if (free || tries === 299){ for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++){ const j = idx(cx + x, cy + y); if (!scorched[j]) owner[j] = p.slot; } p.x = cx + .5; p.y = cy + .5; p.cell = idx(cx, cy); p.d = p.nd = Math.floor(Math.random() * 4); p.inside = true; return; } }
 }
 const local = mkPlayer(me.sessPub); local.hue = style.hue; local.pat = style.pat;
 let drones = [];
@@ -258,12 +285,12 @@ function ensureDrones(){ const humans = [...players.values()].filter(p => !p.dro
   for (const p of [...players.values()]) if (p.drone && drones.indexOf(p) < 0){ clearLand(p.slot); players.delete(p.pk); } }
 const label = p => p.drone ? p.name : nameOf(p.pk);
 function capture(p){
-  for (const c of p.tail) owner[c] = p.slot;
+  for (const c of p.tail) if (!scorched[c]) owner[c] = p.slot;
   const seen = new Uint8Array(COLS * ROWS); const q = [];
   const push = (cx, cy) => { const i = idx(cx, cy); if (!seen[i] && owner[i] !== p.slot){ seen[i] = 1; q.push(i); } };
   for (let x = 0; x < COLS; x++){ push(x, 0); push(x, ROWS - 1); } for (let y = 0; y < ROWS; y++){ push(0, y); push(COLS - 1, y); }
   while (q.length){ const i = q.pop(); const cx = i % COLS, cy = (i - cx) / COLS; if (cx > 0) push(cx - 1, cy); if (cx < COLS - 1) push(cx + 1, cy); if (cy > 0) push(cx, cy - 1); if (cy < ROWS - 1) push(cx, cy + 1); }
-  let gained = p.tail.length, sx = 0, sy = 0; for (let i = 0; i < owner.length; i++) if (!seen[i] && owner[i] !== p.slot){ owner[i] = p.slot; gained++; sx += i % COLS; sy += (i - i % COLS) / COLS; }
+  let gained = p.tail.length, sx = 0, sy = 0; for (let i = 0; i < owner.length; i++) if (!seen[i] && owner[i] !== p.slot && !scorched[i]){ owner[i] = p.slot; gained++; sx += i % COLS; sy += (i - i % COLS) / COLS; }
   const n = gained - p.tail.length; if (n > 0) rings.push({ x: (sx / n + .5) * CELL, y: (sy / n + .5) * CELL, r: 10, max: Math.sqrt(n) * CELL * 1.2, life: 1, color: colorOf(p, 1) });
   p.tail = []; p.tailSet = new Set();
   if (p === local){ if (gained > 20) feed(`you claimed ${gained} cells`, 'claim me'); sendLand(true); }
@@ -313,6 +340,128 @@ function stepBolts(dt){
     }
   }
 }
+// ---------- rampart: cannons, shells, scorched earth ----------
+// Shells are cosmetic arcs; only the crater they leave is synced. The firer publishes one 'boom'
+// event when its shell lands, and every client (the firer included) applies that same boom, so the
+// scorched cells and the ownership they clear are identical everywhere without a second authority.
+const shells = [];
+let cannonsAllowed = 0, rampPhaseKey = '';
+// The blast footprint: a disk of radius BLAST_R around (cx,cy). Owner is cleared and the cell is
+// marked unbuildable. Split out from the fx so it can be tested without a canvas.
+function scorchDisk(cx, cy){
+  let n = 0; const R = Math.ceil(BLAST_R);
+  for (let y = -R; y <= R; y++) for (let x = -R; x <= R; x++){
+    if (Math.hypot(x, y) > BLAST_R) continue;
+    const ax = cx + x, ay = cy + y; if (ax < 0 || ay < 0 || ax >= COLS || ay >= ROWS) continue;
+    const i = idx(ax, ay); if (!scorched[i]) n++; scorched[i] = 1; owner[i] = 0;
+  }
+  return n;
+}
+function boom(bx, by, mine){
+  const cx = Math.floor(bx), cy = Math.floor(by); scorchDisk(cx, cy);
+  const px = (cx + .5) * CELL, py = (cy + .5) * CELL;
+  burst(px, py, 'rgba(255,150,50,1)', 34); burst(px, py, 'rgba(255,255,255,.9)', 12);
+  rings.push({ x: px, y: py, r: 6, max: BLAST_R * CELL * 1.5, life: 1, color: 'hsla(24,100%,60%,1)' });
+  if (mine) kick(5);
+}
+// Launch the next unfired cannon at a target cell. The shell is local; the crater it will leave is
+// published on arrival by stepShells so every client scorches the same place at the same time.
+function launchShell(p, tx, ty){
+  const cannon = (p.cannons || []).find(c => !c.fired); if (!cannon) return false;
+  cannon.fired = true;
+  const cx0 = cannon.cell % COLS, cy0 = (cannon.cell - cannon.cell % COLS) / COLS;
+  const mine = p === local || (p.drone && iDrive());
+  shells.push({ sx: cx0 + .5, sy: cy0 + .5, tx: tx + .5, ty: ty + .5, x: cx0 + .5, y: cy0 + .5, t: 0, hue: p.hue, mine });
+  return true;
+}
+function stepShells(dt){
+  for (let i = shells.length - 1; i >= 0; i--){
+    const s = shells[i]; s.t += dt / (SHELL_MS / 1000);
+    if (s.t >= 1){ shells.splice(i, 1); boom(s.tx, s.ty, s.mine);
+      if (s.mine && net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'boom', x: +s.tx.toFixed(2), y: +s.ty.toFixed(2) }) }));
+      continue; }
+    const e = s.t; s.x = s.sx + (s.tx - s.sx) * e; s.y = s.sy + (s.ty - s.sy) * e - Math.sin(e * Math.PI) * 3;
+  }
+}
+// A rider or drone gets cannons scaled to the land it holds at the moment fortify begins.
+const cannonsFor = land => Math.max(1, Math.min(MAX_CANNONS, Math.round(land / CANNON_PER_CELLS)));
+function placeDroneCannons(d){
+  const allowed = Math.max(1, Math.min(6, Math.round((d.land || 0) / (CANNON_PER_CELLS * 1.5))));
+  d.cannons = []; const own = [];
+  for (let i = 0; i < owner.length; i++) if (owner[i] === d.slot){ own.push(i); if (own.length > 600) break; }
+  for (let k = 0; k < allowed && own.length; k++) d.cannons.push({ cell: own[Math.floor(Math.random() * own.length)], fired: false });
+}
+// Drones I drive fire at random enemy land during bombard, so a solo grid still gets shelled.
+function droneBombard(){
+  if (!iDrive() || !mode.rampart || rampartPhase().key !== 'bombard') return;
+  for (const d of drones){
+    if (!d.alive || now() < (d.bombAt || 0) || !(d.cannons || []).some(c => !c.fired)) continue;
+    d.bombAt = now() + 700 + Math.random() * 1000;
+    const targets = [];
+    for (let i = 0; i < owner.length; i += 7){ const o = owner[i]; if (o && o !== d.slot && !scorched[i]){ targets.push(i); if (targets.length > 80) break; } }
+    if (!targets.length) continue;
+    const cell = targets[Math.floor(Math.random() * targets.length)];
+    launchShell(d, cell % COLS, (cell - cell % COLS) / COLS);
+  }
+}
+// Screen point -> cell index, inverse of draw()'s camera transform. Used for tap-to-place and
+// tap-to-bombard; taps only happen in the frozen tactical phases, so the transient shake offset
+// (kills only) is never in play.
+function cellAt(clientX, clientY){
+  const r = cv.getBoundingClientRect();
+  const wx = (clientX - r.left - (vw / 2 - cam.x * camZoom)) / camZoom;
+  const wy = (clientY - r.top - (vh / 2 - cam.y * camZoom)) / camZoom;
+  const cx = Math.floor(wx / CELL), cy = Math.floor(wy / CELL);
+  if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) return -1;
+  return idx(cx, cy);
+}
+function rampartTap(cell){
+  if (cell < 0 || !started || !local.alive) return;
+  const ph = rampartPhase().key;
+  if (ph === 'fortify'){
+    const at = local.cannons.findIndex(c => c.cell === cell);
+    if (at >= 0){ local.cannons.splice(at, 1); return; }
+    if (owner[cell] !== local.slot){ feed('place cannons on your own land', 'kill'); return; }
+    if (local.cannons.length >= cannonsAllowed){ feed(`only ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'} this round`, 'kill'); return; }
+    local.cannons.push({ cell, fired: false });
+  } else if (ph === 'bombard'){
+    if (scorched[cell]) return;
+    if (owner[cell] === local.slot || owner[cell] === 0){ feed('aim at enemy land', 'kill'); return; }
+    if (!local.cannons.some(c => !c.fired)){ feed('all cannons fired', 'kill'); return; }
+    launchShell(local, cell % COLS, (cell - cell % COLS) / COLS);
+  }
+}
+// Phase edges: bank open tails so nobody freezes mid-run, hand out cannons, and clear the tactical
+// state when build comes back around. Scorched earth is deliberately not cleared here — it lasts
+// until the block resets the board.
+function onRampartPhase(key, prev){
+  // Entering any tactical phase from build banks open tails. Done for bombard too, not just
+  // fortify: a suspended tab whose clock jumps build->bombard (skipping fortify) would otherwise
+  // resume frozen with a dangling build tail. Cannons can't be retro-placed for a skipped fortify;
+  // that rider simply has none this cycle and it self-corrects next build.
+  if ((key === 'fortify' || key === 'bombard') && (prev === 'build' || prev === '')){
+    for (const p of players.values()) if (p.alive && p.tail.length && (p === local || (p.drone && iDrive()))) capture(p);
+  }
+  if (key === 'fortify'){
+    landCounts();
+    cannonsAllowed = cannonsFor(local.land); local.cannons = [];
+    if (started && local.alive) feed(`fortify — place up to ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'}`, 'claim me');
+    if (iDrive()) for (const d of drones) placeDroneCannons(d);
+  } else if (key === 'bombard'){
+    if (started && local.alive) feed('bombard — tap enemy land to shell it', 'kill me');
+    for (const d of drones) d.bombAt = 0;
+  } else if (key === 'build'){
+    for (const p of players.values()) p.cannons = [];
+    shells.length = 0;
+    if (started && prev) feed('build — claim while you can', 'claim');
+  }
+}
+function rampartTick(){
+  if (!mode.rampart){ rampPhaseKey = ''; return; }
+  const key = rampartPhase().key;
+  if (key !== rampPhaseKey){ const prev = rampPhaseKey; rampPhaseKey = key; onRampartPhase(key, prev); }
+  droneBombard();
+}
 function enterCell(p, c){
   const cx = c % COLS, cy = (c - cx) / COLS;
   if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) return die(p, null, 'hit the edge');
@@ -332,6 +481,10 @@ function stepPlayer(p, dt){
   if (c !== p.cell){ p.cell = c; enterCell(p, c); if (!p.alive) return; if (p.nd !== p.d && (p.nd + 2) % 4 !== p.d){ p.d = p.nd; p.x = fx + .5; p.y = fy + .5; } }
 }
 function step(dt){
+  // Rampart freezes every rider during fortify and bombard: those phases are tactical, played with
+  // taps, not the ride. Remotes freeze on their own client, so their ticks go static and the glide
+  // below simply converges to a standstill.
+  const frozen = rampTactical();
   for (const p of players.values()){
     if (!p.alive){ if ((p === local && started || p.drone) && now() - p.diedAt > RESPAWN_MS) spawn(p); continue; }
     if (p !== local && (!p.drone || !iDrive())){ if (now() - p.last > 8000){ clearLand(p.slot); players.delete(p.pk); continue; }
@@ -348,10 +501,12 @@ function step(dt){
         const tx = p.netX + ddx * sp * ahead, ty = p.netY + ddy * sp * ahead;
         const k = Math.min(1, dt * 12); p.x += (tx - p.x) * k; p.y += (ty - p.y) * k; }
       continue; }
+    if (frozen) continue;
     if (p.drone){ driveDrone(p); if (mode.combat) droneMaybeFire(p); }
     stepPlayer(p, dt);
   }
   if (bolts.length) stepBolts(dt);
+  if (shells.length) stepShells(dt);
   for (const q of parts){ q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 300 * dt; q.life -= dt * 1.4; } for (let i = parts.length - 1; i >= 0; i--) if (parts[i].life <= 0) parts.splice(i, 1);
   for (const f of floats){ f.y -= 26 * dt; f.life -= dt; } for (let i = floats.length - 1; i >= 0; i--) if (floats[i].life <= 0) floats.splice(i, 1);
   for (const r of rings){ r.r += (r.max - r.r) * dt * 4; r.life -= dt * 1.1; } for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
@@ -502,9 +657,18 @@ function droneMaybeFire(p){
 
 // ---------- land sync ----------
 function rleMine(s){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < owner.length; i++){ const v = owner[i] === s ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
-function applyRle(s, str){ clearLand(s); let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < owner.length; k++) owner[i + k] = s; i += n; v ^= 1; } }
+function applyRle(s, str){ clearLand(s); let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < owner.length; k++){ if (!scorched[i + k]) owner[i + k] = s; } i += n; v ^= 1; } }
 let lastKey = 0;
 function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
+// Rampart scorched earth is persistent round-state, but booms are live-only ephemerals — a rider
+// joining or reloading mid-round would otherwise start with an empty crater mask, reclaim land
+// every established peer treats as dead, and diverge until the block reset. So the scorched mask
+// is resent as a keyframe (same RLE shape as land) whenever a fresh peer appears. Applying it only
+// ever SETS craters and clears their owner, never un-scorches, so it is safe to receive out of
+// order and idempotent to receive twice.
+function rleScorched(){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < scorched.length; i++){ const v = scorched[i] ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
+function applyScorchedRle(str){ let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < scorched.length; k++){ scorched[i + k] = 1; owner[i + k] = 0; } i += n; v ^= 1; } }
+function sendScorched(){ if (!mode.rampart || !started || !net.ready) return; let any = false; for (let i = 0; i < scorched.length; i++) if (scorched[i]){ any = true; break; } if (!any) return; pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'scorched', rle: rleScorched() }) })); }
 
 // ---------- netcode ----------
 // Ticks carry only their room tag. They also used to carry ['h', block height], which nothing
@@ -576,7 +740,7 @@ function subscribe(){
       if (!net.ready) return;
       let c; try { c = JSON.parse(e.content); } catch { return; }
       const fresh = !players.has(e.pubkey); const p = players.get(e.pubkey) || mkPlayer(e.pubkey); if (!claims.has(e.pubkey)) wantProfile(e.pubkey);
-      if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); }
+      if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); sendScorched(); }
       if (e.kind === K_TICK){
         // The flock rides on the authority's own tick. Ignore it from anyone else, and ignore it
         // entirely while we are the ones driving — otherwise a stale authority's rows fight ours.
@@ -608,6 +772,8 @@ function subscribe(){
           // rule as the flock rows themselves. A rider's shot is their own.
           if (Number.isInteger(c.i)){ if (c.i >= 0 && c.i < MAX_BOTS && !iDrive() && e.pubkey === droneAuthority()){ const d = players.get(dronePk(c.i)); spawnBolt(dronePk(c.i), c.x, c.y, c.d & 3, d ? d.hue : 200); } }
           else spawnBolt(e.pubkey, c.x, c.y, c.d & 3, p.hue); }
+        else if (c.t === 'boom' && mode.rampart && typeof c.x === 'number' && typeof c.y === 'number' && c.x >= 0 && c.x < COLS && c.y >= 0 && c.y < ROWS){ boom(c.x, c.y, false); }
+        else if (c.t === 'scorched' && mode.rampart && typeof c.rle === 'string' && c.rle.length < 30000){ applyScorchedRle(c.rle); }
         else if (c.t === 'dland' && typeof c.rle === 'string' && c.rle.length < 30000){
           if (!iDrive() && e.pubkey === droneAuthority()){ const i = c.i | 0; if (i >= 0 && i < MAX_BOTS) applyRle(adoptDrone(i).slot, c.rle); } }
         else if (c.t === 'kill'){
@@ -671,7 +837,7 @@ let beaconT = null;
 async function beacon(){
   if (!started || !me.id) return;
   const at = Math.floor(Date.now()/1000); landCounts();
-  const payload = { room: room.name, name: (me.guest ? 'guest-' + me.sessPub.slice(0, 4) : nameOf(me.sessPub)).slice(0, 16), hue: style.hue, role: 'seat', at, block: chain.height || undefined, bots: botsWanted, land: +(local.land / (COLS * ROWS) * 100).toFixed(1), ...(mode.combat ? { mode: 'combat' } : {}) };
+  const payload = { room: room.name, name: (me.guest ? 'guest-' + me.sessPub.slice(0, 4) : nameOf(me.sessPub)).slice(0, 16), hue: style.hue, role: 'seat', at, block: chain.height || undefined, bots: botsWanted, land: +(local.land / (COLS * ROWS) * 100).toFixed(1), ...(mode.combat ? { mode: 'combat' } : mode.rampart ? { mode: 'rampart' } : {}) };
   const tags = [['d', PRESENCE_D], ...(room.listed ? [['t', PRESENCE_TAG]] : []), ['t', roomTag()], ['expiration', String(at + PRESENCE_TTL_S)]];
   try { const ev = me.guest ? signAsSess({ kind: K_PRESENCE, tags, content: JSON.stringify(payload) }) : await signAsMe({ kind: K_PRESENCE, tags, content: JSON.stringify(payload) }); pub(ev); } catch {}
 }
@@ -680,9 +846,9 @@ function groupRooms(evs){
   // A combat grid and a classic grid may share a room name but are different tags, so the card
   // list keys on name + mode and each card knows which one it is.
   const rooms = new Map(); const cutoff = Math.floor(Date.now()/1000) - PRESENCE_TTL_S * 3;
-  for (const e of evs){ let p; try { p = JSON.parse(e.content); } catch { continue; } if (!p || typeof p.room !== 'string' || e.created_at < cutoff) continue; const r = cleanRoom(p.room); const combat = p.mode === 'combat'; const key = r + (combat ? '|combat' : ''); let g = rooms.get(key); if (!g) rooms.set(key, g = { name: r, combat, occ: new Map() }); const prev = g.occ.get(e.pubkey); if (!prev || prev.at < e.created_at) g.occ.set(e.pubkey, { pk: e.pubkey, name: String(p.name || '').slice(0, 16), hue: p.hue | 0, at: e.created_at, block: p.block, bots: p.bots, land: p.land }); }
-  const out = [...rooms.values()].map(g => { const riders = [...g.occ.values()].sort((a, b) => b.at - a.at); const bots = riders.find(r => typeof r.bots === 'number')?.bots; return { name: g.name, combat: g.combat, riders, open: Math.max(0, SEATS - riders.length), block: riders[0]?.block, bots, freshest: riders[0]?.at || 0 }; });
-  if (!out.some(r => r.name === 'lobby' && !r.combat)) out.push({ name: 'lobby', combat: false, riders: [], open: SEATS, standing: true, freshest: 0 });
+  for (const e of evs){ let p; try { p = JSON.parse(e.content); } catch { continue; } if (!p || typeof p.room !== 'string' || e.created_at < cutoff) continue; const r = cleanRoom(p.room); const gmode = p.mode === 'combat' ? 'combat' : p.mode === 'rampart' ? 'rampart' : 'classic'; const key = r + '|' + gmode; let g = rooms.get(key); if (!g) rooms.set(key, g = { name: r, gmode, occ: new Map() }); const prev = g.occ.get(e.pubkey); if (!prev || prev.at < e.created_at) g.occ.set(e.pubkey, { pk: e.pubkey, name: String(p.name || '').slice(0, 16), hue: p.hue | 0, at: e.created_at, block: p.block, bots: p.bots, land: p.land }); }
+  const out = [...rooms.values()].map(g => { const riders = [...g.occ.values()].sort((a, b) => b.at - a.at); const bots = riders.find(r => typeof r.bots === 'number')?.bots; return { name: g.name, gmode: g.gmode, riders, open: Math.max(0, SEATS - riders.length), block: riders[0]?.block, bots, freshest: riders[0]?.at || 0 }; });
+  if (!out.some(r => r.name === 'lobby' && r.gmode === 'classic')) out.push({ name: 'lobby', gmode: 'classic', riders: [], open: SEATS, standing: true, freshest: 0 });
   return out.sort((a, b) => b.riders.length - a.riders.length || b.freshest - a.freshest);
 }
 async function fetchLiveRooms(){ const evs = await pool.querySync(GAME_RELAYS, { kinds: [K_PRESENCE], '#t': [PRESENCE_TAG], limit: 300 }, { maxWait: 3500 }).catch(() => []); return groupRooms(evs.filter(e => verifyEvent(e))); }
@@ -690,9 +856,9 @@ let liveT = null;
 async function renderLive(){
   const list = await fetchLiveRooms(); const box = $('liveRooms'); if (!box) return;
   for (const r of list) for (const o of r.riders) wantProfile(o.pk);
-  box.innerHTML = list.slice(0, 8).map(r => { const dots = r.riders.slice(0, SEATS).map(o => `<i title="${esc(o.name || nameOf(o.pk))}" style="background:hsl(${o.hue},95%,60%)"></i>`).join(''); const bits = []; if (r.combat) bits.push('⚔️ combat'); if (r.block) bits.push('block ' + Number(r.block).toLocaleString()); if (typeof r.bots === 'number') bits.push(r.bots + ' drone' + (r.bots === 1 ? '' : 's')); if (r.standing) bits.push('the standing grid · always open'); const here = r.name === room.name && !!r.combat === mode.combat;
-    return `<div class="lr${here ? ' here' : ''}"><div class="lrt"><b>${esc(r.name)}${r.combat ? ' ⚔️' : ''}</b><span class="seats ${r.open ? 'open' : 'full'}">${r.riders.length}/${SEATS}</span></div><div class="dots">${dots || '<span class="muted small">nobody riding</span>'}</div><div class="small muted">${bits.join(' · ')}</div><button class="btn ghost tiny" data-join="${esc(r.name)}" data-mode="${r.combat ? 'combat' : 'classic'}">${here ? 'this grid' : r.open ? 'Join' : 'Squeeze in'}</button></div>`; }).join('');
-  box.querySelectorAll('[data-join]').forEach(b => { b.onclick = () => { setMode(b.dataset.mode === 'combat'); setRoom(b.dataset.join); }; });
+  box.innerHTML = list.slice(0, 8).map(r => { const dots = r.riders.slice(0, SEATS).map(o => `<i title="${esc(o.name || nameOf(o.pk))}" style="background:hsl(${o.hue},95%,60%)"></i>`).join(''); const badge = r.gmode === 'combat' ? ' ⚔️' : r.gmode === 'rampart' ? ' 🏰' : ''; const bits = []; if (r.gmode === 'combat') bits.push('⚔️ combat'); else if (r.gmode === 'rampart') bits.push('🏰 rampart'); if (r.block) bits.push('block ' + Number(r.block).toLocaleString()); if (typeof r.bots === 'number') bits.push(r.bots + ' drone' + (r.bots === 1 ? '' : 's')); if (r.standing) bits.push('the standing grid · always open'); const here = r.name === room.name && r.gmode === modeName();
+    return `<div class="lr${here ? ' here' : ''}"><div class="lrt"><b>${esc(r.name)}${badge}</b><span class="seats ${r.open ? 'open' : 'full'}">${r.riders.length}/${SEATS}</span></div><div class="dots">${dots || '<span class="muted small">nobody riding</span>'}</div><div class="small muted">${bits.join(' · ')}</div><button class="btn ghost tiny" data-join="${esc(r.name)}" data-mode="${r.gmode}">${here ? 'this grid' : r.open ? 'Join' : 'Squeeze in'}</button></div>`; }).join('');
+  box.querySelectorAll('[data-join]').forEach(b => { b.onclick = () => { setMode(b.dataset.mode); setRoom(b.dataset.join); }; });
 }
 function setRoom(name, opts = {}){
   const n = cleanRoom(name); const changed = n !== room.name; room.name = n; if (opts.listed !== undefined) room.listed = !!opts.listed;
@@ -702,18 +868,21 @@ function setRoom(name, opts = {}){
 }
 // Same shape as setRoom: a mode change is a tag change, so it clears the remote roster and
 // resubscribes. Bolts in flight belong to the grid being left.
-function setMode(combat, opts = {}){
-  combat = !!combat; if (combat === mode.combat){ syncModeUI(); return; }
-  mode.combat = combat; localStorage.setItem('br_mode', combat ? 'combat' : 'classic');
-  bolts.length = 0; local.fireCd = 0;
+function setMode(name, opts = {}){
+  const combat = name === 'combat', rampart = name === 'rampart';
+  if (combat === mode.combat && rampart === mode.rampart){ syncModeUI(); return; }
+  mode.combat = combat; mode.rampart = rampart;
+  localStorage.setItem('br_mode', rampart ? 'rampart' : combat ? 'combat' : 'classic');
+  bolts.length = 0; shells.length = 0; local.fireCd = 0; local.cannons = []; scorched.fill(0); rampPhaseKey = '';
   for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); }
   subscribe(); syncModeUI(); syncRoomUI();
-  if (started && !opts.quiet){ feed(combat ? 'combat grid — F or the FIRE button shoots' : 'classic grid'); sendLand(true); startBeacon(); }
+  if (started && !opts.quiet){ feed(rampart ? 'rampart grid — build, fortify, bombard' : combat ? 'combat grid — F or the FIRE button shoots' : 'classic grid'); sendLand(true); startBeacon(); }
   history.replaceState(null, '', inviteUrl().replace(location.origin, ''));
 }
-function syncModeUI(){ $('modeClassic').classList.toggle('on', !mode.combat); $('modeCombat').classList.toggle('on', mode.combat); $('btnFire').classList.toggle('hidden', !mode.combat); $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
-function inviteUrl(){ const u = new URL(location.origin + '/game'); if (room.name !== 'lobby') u.searchParams.set('room', room.name); if (mode.combat) u.searchParams.set('mode', 'combat'); if (botsWanted !== 5) u.searchParams.set('bots', String(botsWanted)); if (!room.listed) u.searchParams.set('private', '1'); return u.toString(); }
-function syncRoomUI(){ $('roomIn').value = room.name; $('hRoom').textContent = room.name + (mode.combat ? ' ⚔️' : ''); $('privToggle').classList.toggle('on', !room.listed); $('privToggle').textContent = room.listed ? 'Listed' : 'Private'; $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
+const modeName = () => mode.rampart ? 'rampart' : mode.combat ? 'combat' : 'classic';
+function syncModeUI(){ $('modeClassic').classList.toggle('on', !mode.combat && !mode.rampart); $('modeCombat').classList.toggle('on', mode.combat); $('modeRampart').classList.toggle('on', mode.rampart); $('btnFire').classList.toggle('hidden', !mode.combat); $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
+function inviteUrl(){ const u = new URL(location.origin + '/game'); if (room.name !== 'lobby') u.searchParams.set('room', room.name); if (mode.combat) u.searchParams.set('mode', 'combat'); else if (mode.rampart) u.searchParams.set('mode', 'rampart'); if (botsWanted !== 5) u.searchParams.set('bots', String(botsWanted)); if (!room.listed) u.searchParams.set('private', '1'); return u.toString(); }
+function syncRoomUI(){ $('roomIn').value = room.name; $('hRoom').textContent = room.name + (mode.combat ? ' ⚔️' : mode.rampart ? ' 🏰' : ''); $('privToggle').classList.toggle('on', !room.listed); $('privToggle').textContent = room.listed ? 'Listed' : 'Private'; $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
 async function share(btn){
   const url = inviteUrl(); const text = `Ride with me on HODLAND, grid “${room.name}”. Claim land on the BLAKE2b grid, rounds are blocks.`;
   if (navigator.share && /Mobi|Android/i.test(navigator.userAgent)) { try { await navigator.share({ title: 'HODLAND', text, url }); return; } catch {} }
@@ -732,8 +901,10 @@ const rowHTML = (p, i) => { const href = p.drone ? null : npubLink(p.pk); return
 async function roundOver(prevHeight){
   const rows = standings(); $('podBlock').textContent = prevHeight.toLocaleString(); $('podList').innerHTML = rows.slice(0, 8).map(rowHTML).join('') || '<div class="sys">Nobody rode this block.</div>'; $('podium').classList.remove('hidden');
   if (rows[0]){ feed(`block ${prevHeight.toLocaleString()} goes to ${label(rows[0])} with ${pct(rows[0])}`, 'claim'); celebrateWinner(rows[0], prevHeight); }
-  if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b', mode: mode.combat ? 'combat' : 'classic' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
-  setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); for (const p of players.values()){ p.kills = 0; p.deaths = 0; if (p === local ? started : true) spawn(p); } }, 7000);
+  if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b', mode: mode.rampart ? 'rampart' : mode.combat ? 'combat' : 'classic' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
+  // A fresh block wipes the board — scorched earth included. Rampart craters are a within-round
+  // constraint, not a permanent scar that would grind every grid down to nothing over time.
+  setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); scorched.fill(0); shells.length = 0; rampPhaseKey = ''; for (const p of players.values()){ p.kills = 0; p.deaths = 0; p.cannons = []; if (p === local ? started : true) spawn(p); } }, 7000);
 }
 async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]);
     // Some early events carry a unix timestamp where the height belongs; a BLAKE2b height is
@@ -806,6 +977,17 @@ function ownerRuns(x0, y0, x1, y1, step){
   }
   return runs;
 }
+// Same horizontal-run coalescing as ownerRuns, but for a single 0/1 mask (scorched earth). Flat
+// [x, y, width, ...] in cell units; the trailing flush covers a run touching the right edge.
+function maskRuns(mask, x0, y0, x1, y1, step){
+  const out = [];
+  for (let y = y0; y < y1; y += step){
+    let on = 0, from = x0, x = x0;
+    for (; x < x1; x += step){ const v = mask[idx(x, y)] ? 1 : 0; if (v === on) continue; if (on) out.push(from, y, x - from); on = v; from = x; }
+    if (on) out.push(from, y, x - from);
+  }
+  return out;
+}
 function draw(){
   const small = vw < 760; const zoom = Math.max(small ? .7 : .55, Math.min(vw / (small ? 900 : 1500), vh / (small ? 700 : 1000), 1)); const tx = started ? local.x * CELL : W/2, ty = started ? local.y * CELL : H/2;
   cam.x += (tx - cam.x) * .12; cam.y += (ty - cam.y) * .12; cam.x = Math.max(vw/2/zoom, Math.min(W - vw/2/zoom, cam.x)); cam.y = Math.max(vh/2/zoom, Math.min(H - vh/2/zoom, cam.y));
@@ -822,12 +1004,25 @@ function draw(){
   // baked into the pattern tile by landFill(), so these rects are flush.
   const runs = ownerRuns(x0, y0, x1, y1, 1);
   for (const [s, arr] of runs){ const p = bySlot.get(s); if (!p) continue; cx.fillStyle = landFill(p.hue, p.pat, p.alive ? .5 : .2); cx.beginPath(); for (let i = 0; i < arr.length; i += 3) cx.rect(arr[i] * CELL, arr[i + 1] * CELL, arr[i + 2] * CELL, CELL); cx.fill(); }
+  // scorched earth: dark craters with a faint ember edge, batched into runs like the land layer.
+  if (mode.rampart){ const sr = maskRuns(scorched, x0, y0, x1, y1, 1);
+    cx.fillStyle = 'rgba(8,3,16,.85)'; cx.beginPath(); for (let i = 0; i < sr.length; i += 3) cx.rect(sr[i] * CELL, sr[i + 1] * CELL, sr[i + 2] * CELL, CELL); cx.fill();
+    cx.strokeStyle = 'rgba(255,90,40,.22)'; cx.lineWidth = 1; cx.beginPath(); for (let i = 0; i < sr.length; i += 3){ const X = sr[i] * CELL, Y = sr[i + 1] * CELL, Wd = sr[i + 2] * CELL; cx.moveTo(X, Y + CELL - .5); cx.lineTo(X + Wd, Y + CELL - .5); } cx.stroke(); }
   const hue = chain.seed % 360; cx.lineWidth = 1; cx.strokeStyle = `hsla(${(hue + 180) % 360},100%,70%,.10)`; cx.beginPath(); for (let x = x0; x <= x1; x++){ cx.moveTo(x * CELL, y0 * CELL); cx.lineTo(x * CELL, y1 * CELL); } for (let y = y0; y <= y1; y++){ cx.moveTo(x0 * CELL, y * CELL); cx.lineTo(x1 * CELL, y * CELL); } cx.stroke();
   for (const p of players.values()){ if (!p.alive || !p.tail.length) continue; cx.fillStyle = colorOf(p, .9); cx.shadowColor = colorOf(p, 1); cx.shadowBlur = 10; cx.beginPath(); for (const c of p.tail){ const tx2 = c % COLS, ty2 = (c - tx2) / COLS; if (tx2 < x0 || tx2 > x1 || ty2 < y0 || ty2 > y1) continue; cx.rect(tx2 * CELL + 3, ty2 * CELL + 3, CELL - 6, CELL - 6); } cx.fill(); cx.shadowBlur = 0; }
   for (const r of rings){ cx.strokeStyle = r.color; cx.globalAlpha = Math.max(0, r.life) * .9; cx.lineWidth = 4; cx.beginPath(); cx.arc(r.x, r.y, r.r, 0, Math.PI * 2); cx.stroke(); cx.globalAlpha = 1; }
   cx.lineCap = 'round';
   for (const b of bolts){ const [bdx, bdy] = DIRS[b.d]; const bx = b.x * CELL, by = b.y * CELL; cx.strokeStyle = `hsla(${b.hue},100%,70%,.95)`; cx.shadowColor = cx.strokeStyle; cx.shadowBlur = 16; cx.lineWidth = 5; cx.beginPath(); cx.moveTo(bx - bdx * CELL * .9, by - bdy * CELL * .9); cx.lineTo(bx, by); cx.stroke(); cx.shadowBlur = 0; }
   cx.lineCap = 'butt';
+  if (mode.rampart){
+    for (const p of players.values()){ if (!p.cannons || !p.cannons.length) continue;
+      for (const cn of p.cannons){ const ccx = cn.cell % COLS, ccy = (cn.cell - cn.cell % COLS) / COLS; if (ccx < x0 || ccx > x1 || ccy < y0 || ccy > y1) continue;
+        const gx = (ccx + .5) * CELL, gy = (ccy + .5) * CELL, r = CELL * .34;
+        cx.fillStyle = '#12042a'; cx.fillRect(gx - 2.5, gy - CELL * .55, 5, CELL * .55);
+        cx.fillStyle = cn.fired ? 'rgba(120,120,140,.85)' : colorOf(p, 1); cx.strokeStyle = 'rgba(0,0,0,.7)'; cx.lineWidth = 2;
+        cx.beginPath(); cx.arc(gx, gy, r, 0, Math.PI * 2); cx.fill(); cx.stroke(); } }
+    for (const s of shells){ const sx2 = s.x * CELL, sy2 = s.y * CELL; cx.fillStyle = `hsla(${s.hue},100%,72%,1)`; cx.shadowColor = cx.fillStyle; cx.shadowBlur = 16; cx.beginPath(); cx.arc(sx2, sy2, 5, 0, Math.PI * 2); cx.fill(); cx.shadowBlur = 0; }
+  }
   for (const p of players.values()){ if (!p.alive) continue; const px = p.x * CELL, py = p.y * CELL, R = CELL * .62;
     cx.shadowColor = colorOf(p, 1); cx.shadowBlur = p.boostUntil > now() ? 34 : 16; cx.fillStyle = colorOf(p, 1); cx.beginPath(); cx.arc(px, py, R + 3, 0, Math.PI * 2); cx.fill(); cx.shadowBlur = 0;
     const img = p.drone ? null : imgOf(p.pk); cx.save(); cx.beginPath(); cx.arc(px, py, R, 0, Math.PI * 2); cx.clip();
@@ -845,6 +1040,7 @@ function draw(){
   // rider, one fillRect per run.
   const sx = mw / COLS, sy = mh / ROWS;
   for (const [s, arr] of ownerRuns(0, 0, COLS, ROWS, 2)){ const p = bySlot.get(s); if (!p) continue; cx.fillStyle = colorOf(p, .9); for (let i = 0; i < arr.length; i += 3) cx.fillRect(mx + arr[i] * sx, my + arr[i + 1] * sy, arr[i + 2] * sx, sy * 2); }
+  if (mode.rampart){ cx.fillStyle = 'rgba(8,3,16,.92)'; const sr = maskRuns(scorched, 0, 0, COLS, ROWS, 2); for (let i = 0; i < sr.length; i += 3) cx.fillRect(mx + sr[i] * sx, my + sr[i + 1] * sy, sr[i + 2] * sx, sy * 2); }
   for (const p of players.values()){ if (!p.alive) continue; cx.fillStyle = '#fff'; cx.fillRect(mx + p.x * sx - 2, my + p.y * sy - 2, 4, 4); }
 }
 // Reads "…" until a tick has been round-tripped, so it never shows a made-up zero. Colour is the
@@ -856,7 +1052,17 @@ function renderPing(){
   el.textContent = ms + 'ms';
   el.style.color = ms < 100 ? 'var(--green)' : ms < 250 ? 'var(--orange)' : 'var(--red)';
 }
-let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ' · ' + esc(droneClass(p.i).label) : ''}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; renderPing(); if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
+// The rampart phase banner: which phase, seconds left, and a per-phase count (cannons placed while
+// fortifying, cannons left while bombarding). Hidden entirely outside rampart mode.
+function renderRampart(){
+  const el = $('rampBanner'); if (!el) return;
+  if (!mode.rampart || !started){ el.classList.add('hidden'); return; }
+  const ph = rampartPhase(); el.classList.remove('hidden'); el.className = 'rampb ' + ph.key;
+  const extra = ph.key === 'fortify' ? ` · ${local.cannons.length}/${cannonsAllowed} placed`
+    : ph.key === 'bombard' ? ` · ${local.cannons.filter(c => !c.fired).length} cannon${local.cannons.filter(c => !c.fired).length === 1 ? '' : 's'} left` : '';
+  el.innerHTML = `<b>${ph.label}</b> <span class="rt">${ph.left}s</span>${extra}<small>${ph.hint}</small>`;
+}
+let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ' · ' + esc(droneClass(p.i).label) : ''}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; renderPing(); renderRampart(); if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
 function feed(msg, cls = ''){ const f = $('feed'); const el = document.createElement('div'); el.className = cls; el.textContent = msg; f.appendChild(el); while (f.children.length > 5) f.firstChild.remove(); setTimeout(() => el.remove(), 4200); }
 
 // ---------- input ----------
@@ -866,14 +1072,17 @@ window.addEventListener('keydown', e => { if (e.target && /^(INPUT|TEXTAREA)$/.t
   if (k === 'escape'){ for (const id of ['board', 'styleBox', 'controls']) $(id).classList.add('hidden'); return; }
   if (k === 'b'){ setBots(botsWanted ? 0 : botsLast); return; } if (k === '['){ setBots(botsWanted - 1); return; } if (k === ']'){ setBots(botsWanted + 1); return; }
   if (k === 'c'){ $('controls').classList.toggle('hidden'); return; } if (k === 'l'){ $('board').classList.toggle('hidden'); if (!$('board').classList.contains('hidden')){ $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); career(); } return; } if (k === 'i'){ share($('btnShare')); return; }
-  if (!started) return; const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } if (k === 'f'){ e.preventDefault(); fire(local); } });
+  if (!started || rampTactical()) return; const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } if (k === 'f'){ e.preventDefault(); fire(local); } });
 let touch = null; cv.addEventListener('pointerdown', e => { touch = { x: e.clientX, y: e.clientY, t: now() }; });
-cv.addEventListener('pointermove', e => { if (!touch || touch.done) return; const dx = e.clientX - touch.x, dy = e.clientY - touch.y; if (Math.hypot(dx, dy) > 22){ steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3)); touch.done = true; } });
-cv.addEventListener('pointerup', e => { if (!touch) return; if (!touch.done && now() - touch.t < 350) boost(); touch = null; });
+// Steering swipes are off during the frozen tactical phases; a tap there places or fires instead.
+cv.addEventListener('pointermove', e => { if (!touch || touch.done || rampTactical()) return; const dx = e.clientX - touch.x, dy = e.clientY - touch.y; if (Math.hypot(dx, dy) > 22){ steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3)); touch.done = true; } });
+cv.addEventListener('pointerup', e => { if (!touch) return; const wasTap = !touch.done && now() - touch.t < 350;
+  if (rampTactical()){ if (wasTap) rampartTap(cellAt(e.clientX, e.clientY)); touch = null; return; }
+  if (wasTap) boost(); touch = null; });
 
 // ---------- loop ----------
 let lastT = now();
-function loop(){ const t = now(); let rem = Math.min(1.5, (t - lastT) / 1000); lastT = t; while (rem > 0){ const dt = Math.min(.05, rem); step(dt); rem -= dt; } draw(); tick(); if (t - hudT > 300){ hudT = t; renderHud(); $('boostBar').style.width = (local.cd > t ? Math.max(0, 1 - (local.cd - t) / BOOST_CD) * 100 : 100) + '%'; if (mode.combat) $('btnFire').style.opacity = local.fireCd > t ? .35 : 1; }
+function loop(){ const t = now(); let rem = Math.min(1.5, (t - lastT) / 1000); lastT = t; while (rem > 0){ const dt = Math.min(.05, rem); step(dt); rem -= dt; } rampartTick(); draw(); tick(); if (t - hudT > 300){ hudT = t; renderHud(); $('boostBar').style.width = (local.cd > t ? Math.max(0, 1 - (local.cd - t) / BOOST_CD) * 100 : 100) + '%'; if (mode.combat) $('btnFire').style.opacity = local.fireCd > t ? .35 : 1; }
   if (document.hidden) setTimeout(loop, 40); else requestAnimationFrame(loop); }
 
 // ---------- lobby & ui wiring ----------
@@ -887,7 +1096,7 @@ $('btnSwitch').onclick = () => { me.id = null; $('who').classList.add('hidden');
 $('btnRide').onclick = async () => { setRoom($('roomIn').value); $('lobby').classList.add('hidden'); started = true; spawn(local); await publishClaim(); sendLand(true); startBeacon(); clearInterval(liveT); };
 $('roomIn').addEventListener('change', () => setRoom($('roomIn').value)); $('roomIn').addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); setRoom($('roomIn').value); } });
 $('privToggle').onclick = () => setRoom(room.name, { listed: !room.listed });
-$('modeClassic').onclick = () => setMode(false); $('modeCombat').onclick = () => setMode(true);
+$('modeClassic').onclick = () => setMode('classic'); $('modeCombat').onclick = () => setMode('combat'); $('modeRampart').onclick = () => setMode('rampart');
 $('btnFire').addEventListener('pointerdown', e => { e.preventDefault(); fire(local); });
 $('btnNewRoom').onclick = () => { const words = ['neon', 'sat', 'blake', 'hodl', 'grid', 'block', 'rider', 'tail', 'moon', 'pink', 'cyan', 'plot']; setRoom(words[Math.floor(Math.random() * words.length)] + '-' + Math.random().toString(36).slice(2, 6)); };
 for (const [less, tog, more] of [['botsLess', 'botsLbl', 'botsMore'], ['botsLess2', 'botsLbl2', 'botsMore2']]){ $(less).onclick = () => setBots(botsWanted - 1); $(more).onclick = () => setBots(botsWanted + 1); $(tog).onclick = () => setBots(botsWanted ? 0 : botsLast); }
@@ -903,6 +1112,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), get combat(){ return mode.combat; }, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
