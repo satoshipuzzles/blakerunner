@@ -43,7 +43,7 @@ const room = { name: cleanRoom(params.get('room') || localStorage.getItem('br_ro
 const roomTag = () => TAG + '-r-' + room.name;
 const MEMPOOL = '/mp';
 const COLS = 140, ROWS = 90, CELL = 22, W = COLS * CELL, H = ROWS * CELL;
-const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 6, KEY_MS = 5000, RESPAWN_MS = 2500, MAX_TAIL = 500;
+const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 10, KEY_MS = 5000, RESPAWN_MS = 2500, MAX_TAIL = 500;
 // Drones: local practice riders. Preference lives in localStorage and the invite link; the count is what the room feels like, not a rule.
 let botsWanted = (() => { const u = params.get('bots'); const raw = u !== null ? u : localStorage.getItem('br_bots'); const n = raw === null ? 5 : Math.floor(Number(raw)); return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, n)) : 5; })(); let botsLast = botsWanted || 5;
 const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
@@ -248,7 +248,7 @@ function step(dt){
     if (!p.alive){ if ((p === local && started || p.drone) && now() - p.diedAt > RESPAWN_MS) spawn(p); continue; }
     if (p !== local && (!p.drone || !iDrive())){ if (now() - p.last > 8000){ clearLand(p.slot); players.delete(p.pk); continue; }
       // Glide toward the last network position, dead-reckoned along the rider's heading so they
-      // keep moving between 6 Hz ticks instead of pausing on each one. Extrapolation is capped at
+      // keep moving between ticks instead of pausing on each one. Extrapolation is capped at
       // 350 ms so a stalled sender drifts to a stop instead of sailing through walls.
       if (p.netAt){ const sp = SPEED * (p.boostUntil > now() ? BOOST : 1); const [ddx, ddy] = DIRS[p.d];
         const ahead = Math.min((now() - p.netAt) / 1000, .35);
@@ -318,7 +318,7 @@ function subscribe(){
         // entirely while we are the ones driving — otherwise a stale authority's rows fight ours.
         if (Array.isArray(c.dr) && !iDrive() && e.pubkey === droneAuthority()) applyFlock(c.dr);
         if (typeof c.x !== 'number') return; p.d = c.d & 3;
-        // Ticks arrive at 6 Hz; the draw loop runs at 60. Snapping x/y here made remote riders
+        // Ticks arrive at TICK_HZ; the draw loop runs at 60. Snapping x/y here made remote riders
         // teleport between tick positions. Store the network position and let step() glide toward
         // it — snap only on first sight, respawn, or a jump too big to be motion (> 4 cells).
         if (!p.alive && c.a || Math.hypot(c.x - p.x, c.y - p.y) > 4){ p.x = c.x; p.y = c.y; }
@@ -350,7 +350,7 @@ function subscribe(){
 // A tail is a path of edge-adjacent cells, so it compresses to a start cell plus run-length
 // directions ("2f4R12U5L3") instead of up to 500 raw indices. Every tick still carries the
 // COMPLETE tail — nothing accumulates between ticks, so a late joiner's first tick is enough —
-// but a full tail is now tens of bytes instead of ~2.5 KB, which at 6 Hz per rider is the
+// but a full tail is now tens of bytes instead of ~2.5 KB, which per rider at tick rate is the
 // difference between a ~3 KB/s room and the ~105 KB/s that was drowning phones.
 const DIRCH = { 1: 'R', [-1]: 'L', [COLS]: 'D', [-COLS]: 'U' }, CHDIR = { R: 1, L: -1, D: COLS, U: -COLS };
 function encodeTail(cells){
