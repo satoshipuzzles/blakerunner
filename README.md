@@ -68,8 +68,16 @@ blocks, signed scores). Everything except the block clock is a Nostr event.
   NIP-40 `expiration` 120 s, republished every 30 s, signed by the npub or the guest session key)
   and the lobby lists **Live grids** with riders, block, drone count and a Join button. "Private"
   keeps the beacon off the live index; the room name is the secret. Eight seats is a courtesy.
-- **Drones (bots)**: 0–7 local practice riders, stepper in the lobby and in-game, `B` toggles,
-  `[` / `]` step. They leave one at a time as real riders arrive. Saved in localStorage.
+- **Drones (bots)**: 0–7 practice riders, stepper in the lobby and in-game, `B` toggles, `[` / `]`
+  step. They leave one at a time as real riders arrive. Saved in localStorage. Three classes —
+  **drifter** (dumb), **steady** (medium), **sharp** (smart) — one table of six dials, not three
+  code paths: how far ahead it plans, how loose a loop it draws, how much tail it carries before
+  banking, whether it notices a rider closing on its own trail, whether it goes to cut yours, how
+  often it re-decides, and how often it fumbles a decision outright. The last two are non-zero for
+  every class including `sharp`: a drone you cannot beat is a wall, not a practice partner. The
+  class is derived from the drone's index on every client, so it costs nothing on the wire; the
+  live reason (`hunting`, `guarding its tail`, `heading home`…) is one small int on the tick and
+  shows under the drone's name on the leaderboard. `node test/perf/drone-brains.mjs` scores them.
 - **Share**: invite link `/game?room=<name>&bots=<n>&private=1` (only non-default parts are
   written). "Share grid" uses the native share sheet on phones, the clipboard elsewhere; `I` copies.
 - **Controls panel** (`C`): keyboard, phone, grid hotkeys and the rules. `L` leaderboard, `Esc` closes.

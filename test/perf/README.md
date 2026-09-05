@@ -12,10 +12,12 @@ The behaviour they justify is pinned by `test/land-runs.test.mjs`, which does ru
 | `wire-latency.mjs` | node only, network | Publish→delivery round trip on the game relays, from the publishing socket and from a second one, plus schnorr sign/verify cost. |
 | `crypto-cost.mjs` | playwright, network | The same schnorr numbers in the browser, loading nostr-tools the way `race.js` does. Node's JIT is not the game's. |
 | `ping-live.mjs` | playwright, network | Rides a guest on the real page and reads `#hPing` out of the live DOM. Exits non-zero if the ping never resolves. |
+| `drone-brains.mjs` | node only | Do the three drone classes actually play differently? Runs the real brain and the real movement/capture/kill code for six simulated minutes and scores each class. |
 
 ```sh
 node test/perf/land-payload.mjs
 node test/perf/capture-rate.mjs
+node test/perf/drone-brains.mjs                    # ROUNDS=20 MINUTES=10 for a tighter read
 node test/perf/wire-latency.mjs                    # RELAYS=wss://... to probe others
 
 npm i -D playwright && npx playwright install chromium
@@ -72,3 +74,37 @@ event. Verification is memoised on the event *object*, so re-verifying one objec
 property read — every rep here gets a fresh object, which is what arrives off a websocket. At
 10 Hz that is 5.9% of one core at 8 riders, and a worst case of 4.9 ms of verification in a
 single frame out of a 16.7 ms budget. On a phone, several times that.
+
+## Drone classes, 2026-09-05
+
+`drone-brains` — 12 rounds × 6 simulated minutes, 7 drones, no human rider. Per drone, averaged
+over the round; range across rounds in brackets:
+
+```
+  class   label     claimed cells        kills           deaths
+  dumb    drifter    1085 [308–2191   ]   9.6 [6–13   ]   21.9 [19–25]
+  medium  steady     2767 [2101–3216  ]   7.8 [5–14   ]    9.1 [5–17]
+  smart   sharp      3680 [2925–4410  ]  26.0 [22–31  ]   10.6 [7–13]
+
+  reasons given, share of frames alive:
+  dumb    claiming 85%, roaming 8%, heading home 6%, dodging 2%
+  medium  claiming 51%, roaming 37%, heading home 7%, guarding its tail 5%, dodging 1%
+  smart   claiming 38%, roaming 21%, hunting 18%, heading home 12%, guarding its tail 10%, dodging 1%
+```
+
+Kills and deaths separate with **non-overlapping ranges** — the sharp class out-kills every
+drifter round 22–31 to 6–13, and the drifter dies 19–25 times against everyone else's 5–17. Land
+claimed overlaps at the edges, which is what a `slip` of .25 buys: a drifter round can go well.
+
+Two results worth keeping rather than tuning away:
+
+- **The sharp class dies slightly MORE than the steady one** (10.6 vs 9.1). Hunting means leaving
+  your own land to go stand in someone else's neighbourhood, and it costs. That is a real trade,
+  not a bug — a class that were better at everything would just be the only class worth having.
+- **`guarding its tail` is 0% for the drifter** and 5%/10% for the two above it. That is the dial
+  doing the work the classes are built on: entering another rider's tail kills *them*, so the only
+  way a drone loses ground is leaving a long trail out while somebody walks up it. The drifter
+  never looks back, which is what makes its territory worth taking.
+
+The mechanism behind these numbers is pinned by `test/drone-classes.test.mjs`, which does run in
+CI. The numbers themselves are statistical and would be a flaky gate, which is why they live here.

@@ -172,7 +172,7 @@ const iDrive = () => { const a = droneAuthority(); return a === null || a === me
 function adoptDrone(i){
   const pk = dronePk(i);
   let d = players.get(pk);
-  if (!d){ d = mkPlayer(pk, true); d.name = DRONE_NAMES[i % DRONE_NAMES.length]; d.hue = (i * 67 + 200) % 360; d.pat = i % PATTERNS.length; d.plan = []; d.i = i; }
+  if (!d){ d = mkPlayer(pk, true); d.name = DRONE_NAMES[i % DRONE_NAMES.length]; d.hue = (i * 67 + 200) % 360; d.pat = i % PATTERNS.length; d.plan = []; d.i = i; d.why = WHY_ROAM; d.thinkAt = 0; d.lastCell = -1; }
   return d;
 }
 // Applied only from the current authority: two clients that briefly disagree about who is in
@@ -186,6 +186,10 @@ function applyFlock(list){
     const d = adoptDrone(i);
     if (!d.alive && row[4] || Math.hypot(row[1] - d.x, row[2] - d.y) > 4){ d.x = row[1]; d.y = row[2]; }
     d.netX = row[1]; d.netY = row[2]; d.netAt = now(); d.d = row[3] & 3; d.alive = !!row[4]; d.last = now();
+    // The reason the driver's brain gave, so a watching client can show why a drone did what it
+    // did and not just that it did it. Bounds-checked like the index above, and optional: a driver
+    // on the old build sends no row[6] and the watcher falls back to the class label alone.
+    d.why = row.length > 6 && DRONE_WHY[row[6] | 0] !== undefined ? row[6] | 0 : WHY_ROAM;
     const t = typeof row[5] === 'string' ? decodeTail(row[5]) : null;
     if (t){ d.tail = t; d.tailSet = new Set(t); }
     if (d.alive && local.alive){ const hc = idx(Math.floor(row[1]), Math.floor(row[2])); if (local.tailSet.has(hc)) die(local, d.pk, ''); }
@@ -193,6 +197,46 @@ function applyFlock(list){
   for (let i = 0; i < MAX_BOTS; i++) if (!seen.has(i)){ const d = players.get(dronePk(i)); if (d){ clearLand(d.slot); players.delete(d.pk); } }
 }
 const DRONE_NAMES = ['Nakamoto', 'Finney', 'Szabo', 'Back', 'Dai', 'Todd', 'Wuille', 'Maxwell'];
+// Drone classes. The behaviour that reads these is driveDrone further down; the table lives up
+// here with the other per-index drone constants because adoptDrone needs it initialised.
+//
+// The flock used to be seven copies of one habit — a random rectangle plan, a one-cell wall check
+// and "head home when the tail passes 70" — and nothing in it ever looked at another player, so
+// drones were scenery rather than opposition.
+//
+// The detail the classes are built around is in enterCell: entering someone ELSE'S tail kills
+// them, not you. A drone can therefore only lose ground by leaving a long trail out while somebody
+// walks up it. So "dumb" is not bad steering — it is big sloppy loops, long exposure and never
+// checking its back, which is free territory for any rider willing to take the walk. "Smart" is
+// tight loops, banking early, noticing a rider closing on its tail, and going to cut yours.
+//
+// One loop, six dials, three rows. A class is a row in this table, never a separate code path.
+//   look   cells of wall and own tail it plans against
+//   box    [min, span] leg length of its roaming loop — how sloppy the shape is
+//   greed  tail length it will carry before banking; greedier is worth more to cut off
+//   guard  radius at which it notices a rider closing on its own trail (0 = never looks back)
+//   hunt   radius at which it goes for a rival's trail (0 = never hunts)
+//   think  ms between decisions: reaction time
+//   slip   chance a decision is fumbled outright
+const DRONE_CLASSES = [
+  { key: 'dumb',   label: 'drifter', look: 3, box: [6, 14], greed: 150, guard: 0,  hunt: 0,  think: 300, slip: .25 },
+  { key: 'medium', label: 'steady',  look: 4, box: [4, 9],  greed: 85,  guard: 7,  hunt: 0,  think: 170, slip: .12 },
+  { key: 'smart',  label: 'sharp',   look: 6, box: [3, 6],  greed: 55,  guard: 12, hunt: 18, think: 90,  slip: .05 },
+];
+// `look` is floored by `think`: at SPEED 7.5 a 300 ms drone has already covered 2.2 cells by the
+// time it reacts, so a lookahead under that is dead weight — it cannot see far enough ahead to
+// use what it saw. drone-classes.test.mjs holds that relationship, and caught this table when
+// dumb was written with look 2.
+// Class comes from the drone index and nothing else, so every client labels drone 3 identically
+// for zero bytes on the wire — the flock row is already the fattest thing in a tick. Ordered so a
+// three-drone grid gets one of each rather than three of the same.
+const DRONE_CLASS_OF = [1, 0, 2, 0, 1, 2, 0];
+const droneClass = i => DRONE_CLASSES[DRONE_CLASS_OF[((i | 0) % DRONE_CLASS_OF.length + DRONE_CLASS_OF.length) % DRONE_CLASS_OF.length]];
+// The reason, in the order the brain considers them. These are not labels bolted on top: each one
+// is set by the branch that actually fired, so what a watcher reads is what the drone did.
+const WHY_ROAM = 0, WHY_CLAIM = 1, WHY_HOME = 2, WHY_DODGE = 3, WHY_GUARD = 4, WHY_HUNT = 5;
+const DRONE_WHY = ['roaming', 'claiming', 'heading home', 'dodging', 'guarding its tail', 'hunting'];
+const droneNote = p => `${droneClass(p.i).label} · ${DRONE_WHY[p.why | 0] || DRONE_WHY[WHY_ROAM]}`;
 function ensureDrones(){ const humans = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 6000)).length; const want = Math.max(0, botsWanted - Math.max(0, humans - 1)); while (drones.length < want){ const i = drones.length;
     // Adopt rather than re-create. On a handover this drone is already in players with the last
     // position the previous authority published, and mkPlayer would replace it with a fresh
@@ -274,15 +318,130 @@ function step(dt){
   for (const r of rings){ r.r += (r.max - r.r) * dt * 4; r.life -= dt * 1.1; } for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
   if (iDrive()) ensureDrones(); else if (drones.length) drones = [];
 }
-function driveDrone(p){
+// ---------- drone brains ----------
+// One loop for all three classes; DRONE_CLASSES up by DRONE_NAMES is the table of dials, and the
+// comment there is the why.
+//
+// Wall and own tail only. Another player's tail is not an obstacle — it is the prize.
+function droneBlocked(p, d, n){
+  const [dx, dy] = DIRS[d], cx = Math.floor(p.x), cy = Math.floor(p.y);
+  for (let k = 1; k <= n; k++){
+    const ax = cx + dx * k, ay = cy + dy * k;
+    if (ax < 1 || ay < 1 || ax >= COLS - 1 || ay >= ROWS - 1) return true;
+    if (p.tailSet.has(idx(ax, ay))) return true;
+  }
+  return false;
+}
+// Head for a cell: try the axis with the bigger gap first, then the other, and take neither if
+// both are blocked at this class's lookahead. Reversing is not a legal turn (stepPlayer drops it),
+// so it is filtered here rather than being set and silently ignored.
+function droneSteer(p, tx, ty, why, look){
+  const cx = Math.floor(p.x), cy = Math.floor(p.y), dx = tx - cx, dy = ty - cy;
+  const opts = [];
+  if (dx) opts.push(dx > 0 ? 0 : 2);
+  if (dy) opts.push(dy > 0 ? 1 : 3);
+  if (opts.length === 2 && Math.abs(dy) > Math.abs(dx)) opts.reverse();
+  for (const d of opts){
+    if ((d + 2) % 4 === p.d) continue;
+    if (droneBlocked(p, d, look)) continue;
+    p.nd = d; p.why = why; p.plan = []; return true;
+  }
+  return false;
+}
+// Nearest own cell. Same stride-3 sweep the old brain used — it is 4200 reads, and it now runs on
+// the class's think cadence instead of every frame, so the sharpest drone pays it 11x a second
+// rather than 60x.
+function droneHome(p){
   const cx = Math.floor(p.x), cy = Math.floor(p.y);
-  const ahead = (d, n = 1) => { const [dx, dy] = DIRS[d]; return [cx + dx * n, cy + dy * n]; };
-  const danger = d => { const [ax, ay] = ahead(d); if (ax < 1 || ay < 1 || ax >= COLS - 1 || ay >= ROWS - 1) return true; const c = idx(ax, ay); return p.tailSet.has(c); };
-  if (p.inside && !p.plan.length){ const a = 3 + Math.floor(Math.random() * 8), b = 3 + Math.floor(Math.random() * 8), turnR = Math.random() < .5; let d0 = p.d; for (let i = 0; i < 4; i++){ const [ax, ay] = ahead(d0, a + 1); if (ax > 1 && ay > 1 && ax < COLS - 2 && ay < ROWS - 2) break; d0 = (d0 + 1) % 4; } const t = d => turnR ? (d + 1) % 4 : (d + 3) % 4; p.plan = [[d0, a], [t(d0), b], [t(t(d0)), a + 2], [t(t(t(d0))), 60]]; p.legLeft = p.plan[0][1]; p.nd = p.plan[0][0]; p.lastCell = -1; }
-  if (p.cell !== p.lastCell){ p.lastCell = p.cell; if (p.plan.length){ p.legLeft--; if (p.legLeft <= 0){ p.plan.shift(); if (p.plan.length){ p.nd = p.plan[0][0]; p.legLeft = p.plan[0][1]; } } } }
+  let best = null, bd = 1e9;
+  for (let i = 0; i < owner.length; i += 3) if (owner[i] === p.slot){
+    const ox = i % COLS, oy = (i - ox) / COLS, d = Math.abs(ox - cx) + Math.abs(oy - cy);
+    if (d < bd){ bd = d; best = [ox, oy]; }
+  }
+  return best;
+}
+// Is a live rider closing on our trail? Sampled every 5th cell: a drone's sense of being followed
+// is allowed to be coarse, and this runs for every drone on every think.
+function droneThreat(p, r){
+  for (const q of players.values()){
+    if (q === p || !q.alive) continue;
+    const qx = Math.floor(q.x), qy = Math.floor(q.y);
+    for (let i = 0; i < p.tail.length; i += 5){
+      const t = p.tail[i], tx = t % COLS, ty = (t - tx) / COLS;
+      if (Math.abs(qx - tx) + Math.abs(qy - ty) <= r) return q;
+    }
+  }
+  return null;
+}
+// Nearest cell of somebody else's trail within reach. Entering it wipes its owner out.
+function droneQuarry(p, r){
+  const cx = Math.floor(p.x), cy = Math.floor(p.y);
+  let best = null, bd = r + 1;
+  for (const q of players.values()){
+    if (q === p || !q.alive) continue;
+    for (let i = 0; i < q.tail.length; i += 3){
+      const t = q.tail[i], tx = t % COLS, ty = (t - tx) / COLS, d = Math.abs(cx - tx) + Math.abs(cy - ty);
+      if (d < bd){ bd = d; best = [tx, ty]; }
+    }
+  }
+  return best;
+}
+function driveDrone(p){
+  const c = droneClass(p.i);
+  // Executing a decision already made, so it runs every frame: the plan's legs are counted in
+  // cells, and gating them on the think cadence would miscount every leg.
+  if (p.cell !== p.lastCell){
+    p.lastCell = p.cell;
+    if (p.plan.length){ p.legLeft--; if (p.legLeft <= 0){ p.plan.shift(); if (p.plan.length){ p.nd = p.plan[0][0]; p.legLeft = p.plan[0][1]; } } }
+  }
+  // Reflex: one cell, every frame, every class, ahead of both gates below. Planning is what a
+  // drone is supposed to be bad at — one that walks into a wall it is already touching reads as
+  // broken rather than as dumb.
+  if (droneBlocked(p, p.nd, 1) || droneBlocked(p, p.d, 1)){
+    const open = [(p.d + 1) % 4, (p.d + 3) % 4].filter(d => !droneBlocked(p, d, 1));
+    if (open.length){ p.nd = open[Math.floor(Math.random() * open.length)]; p.plan = []; p.why = WHY_DODGE; }
+    p.thinkAt = 0;
+  }
+  // Everything past here is a decision, and decisions cost time. `think` is the reaction delay —
+  // at SPEED 7.5 a 300 ms drone has already covered 2.2 cells before it responds to anything —
+  // and `slip` throws the decision away outright for a whole period. Both are non-zero for every
+  // class including the sharpest: a drone you cannot beat is not a practice partner, it is a wall.
+  if (now() < (p.thinkAt || 0)) return;
+  p.thinkAt = now() + c.think;
+  if (Math.random() < c.slip) return;
+  // 1. Being followed with a trail out is the only way a drone loses ground, so looking back is
+  //    the first thing the dumb class does not do.
+  if (c.guard && p.tail.length > 4 && droneThreat(p, c.guard)){
+    const h = droneHome(p);
+    if (h && droneSteer(p, h[0], h[1], WHY_GUARD, c.look)) return;
+  }
+  // 2. A rival trail within reach is a kill.
+  if (c.hunt && p.tail.length < c.greed){
+    const q = droneQuarry(p, c.hunt);
+    if (q && droneSteer(p, q[0], q[1], WHY_HUNT, c.look)) return;
+  }
+  // 3. Bank it.
+  if (!p.inside && p.tail.length > c.greed){
+    const h = droneHome(p);
+    if (h && droneSteer(p, h[0], h[1], WHY_HOME, c.look)) return;
+  }
+  // 4. Nothing pressing: draw a loop out of our own land and follow it. Back inside with the plan
+  //    nearly spent means the land is already banked, so start a fresh shape.
   if (p.inside && p.plan.length && p.plan.length < 3) p.plan = [];
-  if (danger(p.nd) || danger(p.d)){ const opts = [(p.d + 1) % 4, (p.d + 3) % 4].filter(d => !danger(d)); if (opts.length){ p.nd = opts[Math.floor(Math.random() * opts.length)]; p.plan = p.plan.length ? [[p.nd, 3], [(p.nd + (Math.random() < .5 ? 1 : 3)) % 4, 60]] : []; p.legLeft = 3; } }
-  if (!p.inside && p.tail.length > 70){ let best = null, bd = 1e9; for (let i = 0; i < owner.length; i += 3) if (owner[i] === p.slot){ const ox = i % COLS, oy = (i - ox) / COLS; const d = Math.abs(ox - cx) + Math.abs(oy - cy); if (d < bd){ bd = d; best = [ox, oy]; } } if (best){ const pref = Math.abs(best[0] - cx) > Math.abs(best[1] - cy) ? (best[0] > cx ? 0 : 2) : (best[1] > cy ? 1 : 3); if (!danger(pref) && (pref + 2) % 4 !== p.d) p.nd = pref; } }
+  if (p.inside && !p.plan.length){
+    const a = c.box[0] + Math.floor(Math.random() * c.box[1]), b = c.box[0] + Math.floor(Math.random() * c.box[1]), turnR = Math.random() < .5;
+    let d0 = p.d; for (let i = 0; i < 4; i++){ if (!droneBlocked(p, d0, a + 1)) break; d0 = (d0 + 1) % 4; }
+    const t = d => turnR ? (d + 1) % 4 : (d + 3) % 4;
+    p.plan = [[d0, a], [t(d0), b], [t(t(d0)), a + 2], [t(t(t(d0))), 60]];
+    p.legLeft = p.plan[0][1]; p.nd = p.plan[0][0]; p.lastCell = -1;
+  }
+  // The other thing that separates the classes: how far down its own committed heading a drone
+  // looks before it changes its mind. The reflex above only ever sees the next cell.
+  if (droneBlocked(p, p.nd, c.look)){
+    const open = [(p.nd + 1) % 4, (p.nd + 3) % 4].filter(d => (d + 2) % 4 !== p.d && !droneBlocked(p, d, c.look));
+    if (open.length){ p.nd = open[Math.floor(Math.random() * open.length)]; p.plan = []; p.why = WHY_DODGE; return; }
+  }
+  p.why = p.inside ? WHY_ROAM : WHY_CLAIM;
 }
 
 // ---------- land sync ----------
@@ -428,7 +587,9 @@ function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 
   // The whole flock rides in this same event: seven separate drone events would mean seven
   // schnorr signatures per tick, 42 a second, for no benefit.
   const flock = iDrive() && drones.length
-    ? drones.map(d => [d.i, +d.x.toFixed(2), +d.y.toFixed(2), d.d, d.alive ? 1 : 0, encodeTail(d.tail.slice(-MAX_TAIL))])
+    // row[6] is the drone's current reason — one small int, the only thing the classes cost the
+    // wire. The class itself is derived from row[0] on every client, so it costs nothing.
+    ? drones.map(d => [d.i, +d.x.toFixed(2), +d.y.toFixed(2), d.d, d.alive ? 1 : 0, encodeTail(d.tail.slice(-MAX_TAIL)), d.why | 0])
     : null;
   // The tick is the ping's carrier: it already goes out on a fixed cadence, so timing its echo
   // costs one map entry and no extra traffic.
@@ -484,7 +645,7 @@ function landCounts(){ const n = new Uint32Array(slots.length); for (let i = 0; 
 const pct = p => (p.land / (COLS * ROWS) * 100).toFixed(1) + '%';
 const kd = (k, d) => d ? (k / d).toFixed(2) : k ? k.toFixed(2) : '—';
 function standings(){ landCounts(); return [...players.values()].filter(p => p.drone || p === local || now() - p.last < 8000).sort((a, b) => b.land - a.land || b.kills - a.kills); }
-const rowHTML = (p, i) => { const href = p.drone ? null : npubLink(p.pk); return `<${href ? `a href="${href}" target="_blank" rel="noopener"` : 'div'} class="p"><span class="mono muted">${i + 1}</span><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ' <span class="sub">drone</span>' : ''}</span><b>${pct(p)} · ${p.kills}✂ ${p.deaths}☠</b></${href ? 'a' : 'div'}>`; };
+const rowHTML = (p, i) => { const href = p.drone ? null : npubLink(p.pk); return `<${href ? `a href="${href}" target="_blank" rel="noopener"` : 'div'} class="p"><span class="mono muted">${i + 1}</span><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ` <span class="sub">${esc(droneNote(p))}</span>` : ''}</span><b>${pct(p)} · ${p.kills}✂ ${p.deaths}☠</b></${href ? 'a' : 'div'}>`; };
 async function roundOver(prevHeight){
   const rows = standings(); $('podBlock').textContent = prevHeight.toLocaleString(); $('podList').innerHTML = rows.slice(0, 8).map(rowHTML).join('') || '<div class="sys">Nobody rode this block.</div>'; $('podium').classList.remove('hidden');
   if (rows[0]){ feed(`block ${prevHeight.toLocaleString()} goes to ${label(rows[0])} with ${pct(rows[0])}`, 'claim'); celebrateWinner(rows[0], prevHeight); }
@@ -609,7 +770,7 @@ function renderPing(){
   el.textContent = ms + 'ms';
   el.style.color = ms < 100 ? 'var(--green)' : ms < 250 ? 'var(--orange)' : 'var(--red)';
 }
-let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; renderPing(); if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
+let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ' · ' + esc(droneClass(p.i).label) : ''}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; renderPing(); if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
 function feed(msg, cls = ''){ const f = $('feed'); const el = document.createElement('div'); el.className = cls; el.textContent = msg; f.appendChild(el); while (f.children.length > 5) f.firstChild.remove(); setTimeout(() => el.remove(), 4200); }
 
 // ---------- input ----------
