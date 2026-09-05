@@ -40,10 +40,17 @@ const K_TICK = 21110, K_EVT = 21111, K_SCORE = 2112, K_CLAIM = 2113, K_PRESENCE 
 const PRESENCE_D = 'hodland/here', PRESENCE_TAG = 'hodland-live', BEACON_MS = 30000, PRESENCE_TTL_S = 120, SEATS = 8, MAX_BOTS = 7;
 const cleanRoom = r => String(r || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'lobby';
 const room = { name: cleanRoom(params.get('room') || localStorage.getItem('br_room') || 'lobby'), listed: params.get('private') !== '1' && localStorage.getItem('br_room_private') !== '1' };
-const roomTag = () => TAG + '-r-' + room.name;
+// Combat is a property of the grid, not the rider: it is baked into the room tag, so a classic
+// rider and a combat rider on the same room name are on different tags and never see each other.
+// Chosen in the lobby before riding, carried by the invite link.
+const mode = { combat: (params.get('mode') || localStorage.getItem('br_mode')) === 'combat' };
+const roomTag = () => TAG + '-r-' + room.name + (mode.combat ? '-combat' : '');
 const MEMPOOL = '/mp';
 const COLS = 140, ROWS = 90, CELL = 22, W = COLS * CELL, H = ROWS * CELL;
 const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 10, KEY_MS = 5000, RESPAWN_MS = 2500, MAX_TAIL = 500;
+// Combat bolts: ~3x rider speed so they are dodgeable at range and lethal up close, range capped
+// so a bolt is a duel, not cross-map artillery. The cooldown keeps land-claiming the core game.
+const BOLT_SPEED = 22, BOLT_RANGE = 20, BOLT_HIT_R = .7, FIRE_CD_MS = 2500;
 // Drones: local practice riders. Preference lives in localStorage and the invite link; the count is what the room feels like, not a rule.
 let botsWanted = (() => { const u = params.get('bots'); const raw = u !== null ? u : localStorage.getItem('br_bots'); const n = raw === null ? 5 : Math.floor(Number(raw)); return Number.isFinite(n) ? Math.max(0, Math.min(MAX_BOTS, n)) : 5; })(); let botsLast = botsWanted || 5;
 const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
@@ -140,7 +147,7 @@ const owner = new Uint8Array(COLS * ROWS);
 const slots = [null]; const slotOf = new Map();
 function slot(pk){ if (slotOf.has(pk)) return slotOf.get(pk); const s = slots.length; slots.push(pk); slotOf.set(pk, s); return s; }
 const players = new Map(); let started = false;
-function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0 }; players.set(pk, p); return p; }
+function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, fireCd: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0 }; players.set(pk, p); return p; }
 function clearLand(s){ for (let i = 0; i < owner.length; i++) if (owner[i] === s) owner[i] = 0; }
 function spawn(p){
   clearLand(p.slot); p.tail = []; p.tailSet = new Set(); p.alive = true; p.boostUntil = 0;
@@ -267,13 +274,44 @@ function capture(p){
     if (gained > 120) feed(`${label(p)} claimed ${gained} cells`, 'claim');
   }
 }
-function die(p, by, why){
+function die(p, by, why, verb){
   if (!p.alive) return; p.alive = false; p.deaths++; p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set();
   killFx(p, p === local || by === me.sessPub);
   const killer = by && players.get(by); if (killer && killer !== p) killer.kills++;
   const who = label(p); const kn = killer ? label(killer) : null;
-  feed(kn ? `${kn} wiped out ${who}` : `${who} ${why || 'wiped out'}`, p === local || by === me.sessPub ? 'kill me' : 'kill');
-  if (p === local){ $('deadBy').textContent = kn ? 'cut off by ' + kn : why; $('deadMsg').classList.remove('hidden'); setTimeout(() => $('deadMsg').classList.add('hidden'), RESPAWN_MS); if (navigator.vibrate) navigator.vibrate(120); if (net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'die', by: by || null }) })); }
+  feed(kn ? `${kn} ${verb || 'wiped out'} ${who}` : `${who} ${why || 'wiped out'}`, p === local || by === me.sessPub ? 'kill me' : 'kill');
+  if (p === local){ $('deadBy').textContent = kn ? (verb ? verb + ' by ' : 'cut off by ') + kn : why; $('deadMsg').classList.remove('hidden'); setTimeout(() => $('deadMsg').classList.add('hidden'), RESPAWN_MS); if (navigator.vibrate) navigator.vibrate(120); if (net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'die', by: by || null, ...(verb === 'shot down' ? { how: 'shot' } : {}) }) })); }
+}
+// ---------- combat: bolts ----------
+// A bolt lives entirely in cell space and hits the first living rider within BOLT_HIT_R. Deaths
+// follow the same authority rules as tail cuts: your own death is always yours to detect (every
+// client simulates every published bolt), a drone's death is applied by whoever may act for it,
+// and a remote rider hit by YOUR bolt gets the same victim-honoured 'kill' event a tail cut sends.
+const bolts = [];
+function spawnBolt(pk, x, y, d, hue){ if (!mode.combat) return; bolts.push({ pk, x, y, d: d & 3, left: BOLT_RANGE, hue }); }
+function fire(p){
+  if (!mode.combat || !started || !p.alive || now() < (p.fireCd || 0)) return;
+  p.fireCd = now() + FIRE_CD_MS + (p.drone ? Math.random() * 1200 : 0);
+  spawnBolt(p.pk, p.x, p.y, p.d, p.hue);
+  if (net.ready && (p === local || (p.drone && iDrive()))) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'shot', x: +p.x.toFixed(2), y: +p.y.toFixed(2), d: p.d, ...(p.drone ? { i: p.i } : {}) }) }));
+}
+function stepBolts(dt){
+  outer: for (let i = bolts.length - 1; i >= 0; i--){
+    const b = bolts[i]; const mv = BOLT_SPEED * dt; const [dx, dy] = DIRS[b.d]; b.x += dx * mv; b.y += dy * mv; b.left -= mv;
+    if (b.left <= 0 || b.x < 0 || b.y < 0 || b.x >= COLS || b.y >= ROWS){ bolts.splice(i, 1); continue; }
+    for (const q of players.values()){
+      if (!q.alive || q.pk === b.pk) continue;
+      if (Math.hypot(q.x - b.x, q.y - b.y) > BOLT_HIT_R) continue;
+      bolts.splice(i, 1); burst(b.x * CELL, b.y * CELL, colorOf(q, 1), 18);
+      const mine = b.pk === me.sessPub;
+      if (q === local) die(local, b.pk, '', 'shot down');
+      else if (q.drone){ if (iDrive() || mine){ die(q, b.pk, '', 'shot down'); if (mine && net.ready && !iDrive()) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()], ['p', q.pk]], content: JSON.stringify({ t: 'kill', victim: q.pk, how: 'shot' }) })); } }
+      else if (mine){ die(q, b.pk, '', 'shot down'); if (net.ready) pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()], ['p', q.pk]], content: JSON.stringify({ t: 'kill', victim: q.pk, how: 'shot' }) })); }
+      // Somebody else's bolt hitting somebody else: the spark is shown, the death is the
+      // victim's own client's call — it is simulating this same bolt.
+      continue outer;
+    }
+  }
 }
 function enterCell(p, c){
   const cx = c % COLS, cy = (c - cx) / COLS;
@@ -310,9 +348,10 @@ function step(dt){
         const tx = p.netX + ddx * sp * ahead, ty = p.netY + ddy * sp * ahead;
         const k = Math.min(1, dt * 12); p.x += (tx - p.x) * k; p.y += (ty - p.y) * k; }
       continue; }
-    if (p.drone) driveDrone(p);
+    if (p.drone){ driveDrone(p); if (mode.combat) droneMaybeFire(p); }
     stepPlayer(p, dt);
   }
+  if (bolts.length) stepBolts(dt);
   for (const q of parts){ q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 300 * dt; q.life -= dt * 1.4; } for (let i = parts.length - 1; i >= 0; i--) if (parts[i].life <= 0) parts.splice(i, 1);
   for (const f of floats){ f.y -= 26 * dt; f.life -= dt; } for (let i = floats.length - 1; i >= 0; i--) if (floats[i].life <= 0) floats.splice(i, 1);
   for (const r of rings){ r.r += (r.max - r.r) * dt * 4; r.life -= dt * 1.1; } for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
@@ -443,6 +482,23 @@ function driveDrone(p){
   }
   p.why = p.inside ? WHY_ROAM : WHY_CLAIM;
 }
+// Combat grids only, and deliberately outside driveDrone: the steering brain is lifted verbatim
+// into the class tests, which have no netcode to stub. A rider lined up down the drone's heading
+// is a target; the class's think delay and slip apply, so the sharp class snaps shots and the
+// drifter misses its moment. Drones never shoot each other — the flock cannot thin itself out.
+function droneMaybeFire(p){
+  if (!p.alive || now() < (p.fireCd || 0) || now() < (p.aimAt || 0)) return;
+  const c = droneClass(p.i);
+  p.aimAt = now() + c.think;
+  if (Math.random() < c.slip) return;
+  const [fx, fy] = DIRS[p.d];
+  for (const q of players.values()){
+    if (q === p || !q.alive || q.drone) continue;
+    const ddx = q.x - p.x, ddy = q.y - p.y;
+    const along = ddx * fx + ddy * fy, across = Math.abs(ddx * fy - ddy * fx);
+    if (along > 2 && along < BOLT_RANGE && across < .8){ fire(p); return; }
+  }
+}
 
 // ---------- land sync ----------
 function rleMine(s){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < owner.length; i++){ const v = owner[i] === s ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
@@ -539,15 +595,28 @@ function subscribe(){
         if (p.alive && local.alive){ const hc = idx(Math.floor(c.x), Math.floor(c.y)); if (local.tailSet.has(hc)) die(local, p.pk, ''); } }
       else if (e.kind === K_EVT){ p.last = now();
         if (c.t === 'land' && typeof c.rle === 'string' && c.rle.length < 30000) applyRle(p.slot, c.rle);
-        else if (c.t === 'die'){ if (p.alive){ p.alive = false; killFx(p, c.by === me.sessPub); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; feed(kn ? `${kn} wiped out ${nameOf(p.pk)}` : `${nameOf(p.pk)} wiped out`, c.by === me.sessPub ? 'kill me' : 'kill'); } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); if (c.by === me.sessPub) local.kills++; }
+        else if (c.t === 'die'){
+          // A death we applied locally under two seconds ago (our bolt, or their tail on our sim)
+          // makes this event a pure echo — and the alive flag alone cannot tell: the victim's last
+          // pre-death tick often lands in between and briefly flips them alive again. Respawn takes
+          // 2.5 s, so a real second death can never be this close. Counting the echo doubled the
+          // shooter's kills, which in combat mode is the score.
+          if (now() - p.diedAt < 1500){ p.alive = false; }
+          else { if (p.alive){ p.alive = false; killFx(p, c.by === me.sessPub); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; const vb = c.how === 'shot' ? 'shot down' : 'wiped out'; feed(kn ? `${kn} ${vb} ${nameOf(p.pk)}` : `${nameOf(p.pk)} ${vb}`, c.by === me.sessPub ? 'kill me' : 'kill'); if (c.by === me.sessPub) local.kills++; } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); } }
+        else if (c.t === 'shot' && mode.combat && typeof c.x === 'number' && typeof c.y === 'number'){
+          // A drone's shot (c.i set) is honoured only from the flock authority — same single-writer
+          // rule as the flock rows themselves. A rider's shot is their own.
+          if (Number.isInteger(c.i)){ if (c.i >= 0 && c.i < MAX_BOTS && !iDrive() && e.pubkey === droneAuthority()){ const d = players.get(dronePk(c.i)); spawnBolt(dronePk(c.i), c.x, c.y, c.d & 3, d ? d.hue : 200); } }
+          else spawnBolt(e.pubkey, c.x, c.y, c.d & 3, p.hue); }
         else if (c.t === 'dland' && typeof c.rle === 'string' && c.rle.length < 30000){
           if (!iDrive() && e.pubkey === droneAuthority()){ const i = c.i | 0; if (i >= 0 && i < MAX_BOTS) applyRle(adoptDrone(i).slot, c.rle); } }
         else if (c.t === 'kill'){
-          if (c.victim === me.sessPub) die(local, e.pubkey, '');
+          const vb = c.how === 'shot' ? 'shot down' : undefined;
+          if (c.victim === me.sessPub) die(local, e.pubkey, '', vb);
           // A rider who cuts off a drone reports it; only the authority acts on that, so the
           // flock has exactly one writer.
           else if (iDrive() && typeof c.victim === 'string' && c.victim.startsWith('drone')){
-            const d = players.get(c.victim); if (d && d.drone) die(d, e.pubkey, ''); } } } },
+            const d = players.get(c.victim); if (d && d.drone) die(d, e.pubkey, '', vb); } } } },
     oneose: () => { net.ready = true; $('hRelay').classList.add('on'); },
     // nostr-tools 2.10.4 has no reconnect of its own, so a dropped subscription stays dropped and
     // the rider silently stops seeing anyone. This fires once every relay is gone; come back with
@@ -602,16 +671,18 @@ let beaconT = null;
 async function beacon(){
   if (!started || !me.id) return;
   const at = Math.floor(Date.now()/1000); landCounts();
-  const payload = { room: room.name, name: (me.guest ? 'guest-' + me.sessPub.slice(0, 4) : nameOf(me.sessPub)).slice(0, 16), hue: style.hue, role: 'seat', at, block: chain.height || undefined, bots: botsWanted, land: +(local.land / (COLS * ROWS) * 100).toFixed(1) };
+  const payload = { room: room.name, name: (me.guest ? 'guest-' + me.sessPub.slice(0, 4) : nameOf(me.sessPub)).slice(0, 16), hue: style.hue, role: 'seat', at, block: chain.height || undefined, bots: botsWanted, land: +(local.land / (COLS * ROWS) * 100).toFixed(1), ...(mode.combat ? { mode: 'combat' } : {}) };
   const tags = [['d', PRESENCE_D], ...(room.listed ? [['t', PRESENCE_TAG]] : []), ['t', roomTag()], ['expiration', String(at + PRESENCE_TTL_S)]];
   try { const ev = me.guest ? signAsSess({ kind: K_PRESENCE, tags, content: JSON.stringify(payload) }) : await signAsMe({ kind: K_PRESENCE, tags, content: JSON.stringify(payload) }); pub(ev); } catch {}
 }
 function startBeacon(){ clearInterval(beaconT); beacon(); beaconT = setInterval(beacon, BEACON_MS); }
 function groupRooms(evs){
+  // A combat grid and a classic grid may share a room name but are different tags, so the card
+  // list keys on name + mode and each card knows which one it is.
   const rooms = new Map(); const cutoff = Math.floor(Date.now()/1000) - PRESENCE_TTL_S * 3;
-  for (const e of evs){ let p; try { p = JSON.parse(e.content); } catch { continue; } if (!p || typeof p.room !== 'string' || e.created_at < cutoff) continue; const r = cleanRoom(p.room); let occ = rooms.get(r); if (!occ) rooms.set(r, occ = new Map()); const prev = occ.get(e.pubkey); if (!prev || prev.at < e.created_at) occ.set(e.pubkey, { pk: e.pubkey, name: String(p.name || '').slice(0, 16), hue: p.hue | 0, at: e.created_at, block: p.block, bots: p.bots, land: p.land }); }
-  const out = [...rooms].map(([name, occ]) => { const riders = [...occ.values()].sort((a, b) => b.at - a.at); const bots = riders.find(r => typeof r.bots === 'number')?.bots; return { name, riders, open: Math.max(0, SEATS - riders.length), block: riders[0]?.block, bots, freshest: riders[0]?.at || 0 }; });
-  if (!out.some(r => r.name === 'lobby')) out.push({ name: 'lobby', riders: [], open: SEATS, standing: true, freshest: 0 });
+  for (const e of evs){ let p; try { p = JSON.parse(e.content); } catch { continue; } if (!p || typeof p.room !== 'string' || e.created_at < cutoff) continue; const r = cleanRoom(p.room); const combat = p.mode === 'combat'; const key = r + (combat ? '|combat' : ''); let g = rooms.get(key); if (!g) rooms.set(key, g = { name: r, combat, occ: new Map() }); const prev = g.occ.get(e.pubkey); if (!prev || prev.at < e.created_at) g.occ.set(e.pubkey, { pk: e.pubkey, name: String(p.name || '').slice(0, 16), hue: p.hue | 0, at: e.created_at, block: p.block, bots: p.bots, land: p.land }); }
+  const out = [...rooms.values()].map(g => { const riders = [...g.occ.values()].sort((a, b) => b.at - a.at); const bots = riders.find(r => typeof r.bots === 'number')?.bots; return { name: g.name, combat: g.combat, riders, open: Math.max(0, SEATS - riders.length), block: riders[0]?.block, bots, freshest: riders[0]?.at || 0 }; });
+  if (!out.some(r => r.name === 'lobby' && !r.combat)) out.push({ name: 'lobby', combat: false, riders: [], open: SEATS, standing: true, freshest: 0 });
   return out.sort((a, b) => b.riders.length - a.riders.length || b.freshest - a.freshest);
 }
 async function fetchLiveRooms(){ const evs = await pool.querySync(GAME_RELAYS, { kinds: [K_PRESENCE], '#t': [PRESENCE_TAG], limit: 300 }, { maxWait: 3500 }).catch(() => []); return groupRooms(evs.filter(e => verifyEvent(e))); }
@@ -619,18 +690,30 @@ let liveT = null;
 async function renderLive(){
   const list = await fetchLiveRooms(); const box = $('liveRooms'); if (!box) return;
   for (const r of list) for (const o of r.riders) wantProfile(o.pk);
-  box.innerHTML = list.slice(0, 8).map(r => { const dots = r.riders.slice(0, SEATS).map(o => `<i title="${esc(o.name || nameOf(o.pk))}" style="background:hsl(${o.hue},95%,60%)"></i>`).join(''); const bits = []; if (r.block) bits.push('block ' + Number(r.block).toLocaleString()); if (typeof r.bots === 'number') bits.push(r.bots + ' drone' + (r.bots === 1 ? '' : 's')); if (r.standing) bits.push('the standing grid · always open'); const here = r.name === room.name;
-    return `<div class="lr${here ? ' here' : ''}"><div class="lrt"><b>${esc(r.name)}</b><span class="seats ${r.open ? 'open' : 'full'}">${r.riders.length}/${SEATS}</span></div><div class="dots">${dots || '<span class="muted small">nobody riding</span>'}</div><div class="small muted">${bits.join(' · ')}</div><button class="btn ghost tiny" data-join="${esc(r.name)}">${here ? 'this grid' : r.open ? 'Join' : 'Squeeze in'}</button></div>`; }).join('');
-  box.querySelectorAll('[data-join]').forEach(b => { b.onclick = () => { setRoom(b.dataset.join); }; });
+  box.innerHTML = list.slice(0, 8).map(r => { const dots = r.riders.slice(0, SEATS).map(o => `<i title="${esc(o.name || nameOf(o.pk))}" style="background:hsl(${o.hue},95%,60%)"></i>`).join(''); const bits = []; if (r.combat) bits.push('⚔️ combat'); if (r.block) bits.push('block ' + Number(r.block).toLocaleString()); if (typeof r.bots === 'number') bits.push(r.bots + ' drone' + (r.bots === 1 ? '' : 's')); if (r.standing) bits.push('the standing grid · always open'); const here = r.name === room.name && !!r.combat === mode.combat;
+    return `<div class="lr${here ? ' here' : ''}"><div class="lrt"><b>${esc(r.name)}${r.combat ? ' ⚔️' : ''}</b><span class="seats ${r.open ? 'open' : 'full'}">${r.riders.length}/${SEATS}</span></div><div class="dots">${dots || '<span class="muted small">nobody riding</span>'}</div><div class="small muted">${bits.join(' · ')}</div><button class="btn ghost tiny" data-join="${esc(r.name)}" data-mode="${r.combat ? 'combat' : 'classic'}">${here ? 'this grid' : r.open ? 'Join' : 'Squeeze in'}</button></div>`; }).join('');
+  box.querySelectorAll('[data-join]').forEach(b => { b.onclick = () => { setMode(b.dataset.mode === 'combat'); setRoom(b.dataset.join); }; });
 }
 function setRoom(name, opts = {}){
   const n = cleanRoom(name); const changed = n !== room.name; room.name = n; if (opts.listed !== undefined) room.listed = !!opts.listed;
   localStorage.setItem('br_room', n); localStorage.setItem('br_room_private', room.listed ? '0' : '1');
-  syncRoomUI(); if (changed){ for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); } subscribe(); if (started){ feed(`moved to grid “${n}”`); sendLand(true); startBeacon(); } }
+  syncRoomUI(); if (changed){ bolts.length = 0; for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); } subscribe(); if (started){ feed(`moved to grid “${n}”`); sendLand(true); startBeacon(); } }
   history.replaceState(null, '', inviteUrl().replace(location.origin, ''));
 }
-function inviteUrl(){ const u = new URL(location.origin + '/game'); if (room.name !== 'lobby') u.searchParams.set('room', room.name); if (botsWanted !== 5) u.searchParams.set('bots', String(botsWanted)); if (!room.listed) u.searchParams.set('private', '1'); return u.toString(); }
-function syncRoomUI(){ $('roomIn').value = room.name; $('hRoom').textContent = room.name; $('privToggle').classList.toggle('on', !room.listed); $('privToggle').textContent = room.listed ? 'Listed' : 'Private'; $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
+// Same shape as setRoom: a mode change is a tag change, so it clears the remote roster and
+// resubscribes. Bolts in flight belong to the grid being left.
+function setMode(combat, opts = {}){
+  combat = !!combat; if (combat === mode.combat){ syncModeUI(); return; }
+  mode.combat = combat; localStorage.setItem('br_mode', combat ? 'combat' : 'classic');
+  bolts.length = 0; local.fireCd = 0;
+  for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); }
+  subscribe(); syncModeUI(); syncRoomUI();
+  if (started && !opts.quiet){ feed(combat ? 'combat grid — F or the FIRE button shoots' : 'classic grid'); sendLand(true); startBeacon(); }
+  history.replaceState(null, '', inviteUrl().replace(location.origin, ''));
+}
+function syncModeUI(){ $('modeClassic').classList.toggle('on', !mode.combat); $('modeCombat').classList.toggle('on', mode.combat); $('btnFire').classList.toggle('hidden', !mode.combat); $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
+function inviteUrl(){ const u = new URL(location.origin + '/game'); if (room.name !== 'lobby') u.searchParams.set('room', room.name); if (mode.combat) u.searchParams.set('mode', 'combat'); if (botsWanted !== 5) u.searchParams.set('bots', String(botsWanted)); if (!room.listed) u.searchParams.set('private', '1'); return u.toString(); }
+function syncRoomUI(){ $('roomIn').value = room.name; $('hRoom').textContent = room.name + (mode.combat ? ' ⚔️' : ''); $('privToggle').classList.toggle('on', !room.listed); $('privToggle').textContent = room.listed ? 'Listed' : 'Private'; $('inviteUrl').textContent = inviteUrl().replace(/^https?:\/\//, ''); }
 async function share(btn){
   const url = inviteUrl(); const text = `Ride with me on HODLAND, grid “${room.name}”. Claim land on the BLAKE2b grid, rounds are blocks.`;
   if (navigator.share && /Mobi|Android/i.test(navigator.userAgent)) { try { await navigator.share({ title: 'HODLAND', text, url }); return; } catch {} }
@@ -644,12 +727,12 @@ function syncBotsUI(){ for (const id of ['botsLbl', 'botsLbl2']) $(id).textConte
 function landCounts(){ const n = new Uint32Array(slots.length); for (let i = 0; i < owner.length; i++) n[owner[i]]++; for (const p of players.values()) p.land = n[p.slot] || 0; }
 const pct = p => (p.land / (COLS * ROWS) * 100).toFixed(1) + '%';
 const kd = (k, d) => d ? (k / d).toFixed(2) : k ? k.toFixed(2) : '—';
-function standings(){ landCounts(); return [...players.values()].filter(p => p.drone || p === local || now() - p.last < 8000).sort((a, b) => b.land - a.land || b.kills - a.kills); }
+function standings(){ landCounts(); return [...players.values()].filter(p => p.drone || p === local || now() - p.last < 8000).sort((a, b) => mode.combat ? (b.kills - a.kills || b.land - a.land) : (b.land - a.land || b.kills - a.kills)); }
 const rowHTML = (p, i) => { const href = p.drone ? null : npubLink(p.pk); return `<${href ? `a href="${href}" target="_blank" rel="noopener"` : 'div'} class="p"><span class="mono muted">${i + 1}</span><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ` <span class="sub">${esc(droneNote(p))}</span>` : ''}</span><b>${pct(p)} · ${p.kills}✂ ${p.deaths}☠</b></${href ? 'a' : 'div'}>`; };
 async function roundOver(prevHeight){
   const rows = standings(); $('podBlock').textContent = prevHeight.toLocaleString(); $('podList').innerHTML = rows.slice(0, 8).map(rowHTML).join('') || '<div class="sys">Nobody rode this block.</div>'; $('podium').classList.remove('hidden');
   if (rows[0]){ feed(`block ${prevHeight.toLocaleString()} goes to ${label(rows[0])} with ${pct(rows[0])}`, 'claim'); celebrateWinner(rows[0], prevHeight); }
-  if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
+  if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b', mode: mode.combat ? 'combat' : 'classic' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
   setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); for (const p of players.values()){ p.kills = 0; p.deaths = 0; if (p === local ? started : true) spawn(p); } }, 7000);
 }
 async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]);
@@ -742,6 +825,9 @@ function draw(){
   const hue = chain.seed % 360; cx.lineWidth = 1; cx.strokeStyle = `hsla(${(hue + 180) % 360},100%,70%,.10)`; cx.beginPath(); for (let x = x0; x <= x1; x++){ cx.moveTo(x * CELL, y0 * CELL); cx.lineTo(x * CELL, y1 * CELL); } for (let y = y0; y <= y1; y++){ cx.moveTo(x0 * CELL, y * CELL); cx.lineTo(x1 * CELL, y * CELL); } cx.stroke();
   for (const p of players.values()){ if (!p.alive || !p.tail.length) continue; cx.fillStyle = colorOf(p, .9); cx.shadowColor = colorOf(p, 1); cx.shadowBlur = 10; cx.beginPath(); for (const c of p.tail){ const tx2 = c % COLS, ty2 = (c - tx2) / COLS; if (tx2 < x0 || tx2 > x1 || ty2 < y0 || ty2 > y1) continue; cx.rect(tx2 * CELL + 3, ty2 * CELL + 3, CELL - 6, CELL - 6); } cx.fill(); cx.shadowBlur = 0; }
   for (const r of rings){ cx.strokeStyle = r.color; cx.globalAlpha = Math.max(0, r.life) * .9; cx.lineWidth = 4; cx.beginPath(); cx.arc(r.x, r.y, r.r, 0, Math.PI * 2); cx.stroke(); cx.globalAlpha = 1; }
+  cx.lineCap = 'round';
+  for (const b of bolts){ const [bdx, bdy] = DIRS[b.d]; const bx = b.x * CELL, by = b.y * CELL; cx.strokeStyle = `hsla(${b.hue},100%,70%,.95)`; cx.shadowColor = cx.strokeStyle; cx.shadowBlur = 16; cx.lineWidth = 5; cx.beginPath(); cx.moveTo(bx - bdx * CELL * .9, by - bdy * CELL * .9); cx.lineTo(bx, by); cx.stroke(); cx.shadowBlur = 0; }
+  cx.lineCap = 'butt';
   for (const p of players.values()){ if (!p.alive) continue; const px = p.x * CELL, py = p.y * CELL, R = CELL * .62;
     cx.shadowColor = colorOf(p, 1); cx.shadowBlur = p.boostUntil > now() ? 34 : 16; cx.fillStyle = colorOf(p, 1); cx.beginPath(); cx.arc(px, py, R + 3, 0, Math.PI * 2); cx.fill(); cx.shadowBlur = 0;
     const img = p.drone ? null : imgOf(p.pk); cx.save(); cx.beginPath(); cx.arc(px, py, R, 0, Math.PI * 2); cx.clip();
@@ -780,14 +866,14 @@ window.addEventListener('keydown', e => { if (e.target && /^(INPUT|TEXTAREA)$/.t
   if (k === 'escape'){ for (const id of ['board', 'styleBox', 'controls']) $(id).classList.add('hidden'); return; }
   if (k === 'b'){ setBots(botsWanted ? 0 : botsLast); return; } if (k === '['){ setBots(botsWanted - 1); return; } if (k === ']'){ setBots(botsWanted + 1); return; }
   if (k === 'c'){ $('controls').classList.toggle('hidden'); return; } if (k === 'l'){ $('board').classList.toggle('hidden'); if (!$('board').classList.contains('hidden')){ $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); career(); } return; } if (k === 'i'){ share($('btnShare')); return; }
-  if (!started) return; const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } });
+  if (!started) return; const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } if (k === 'f'){ e.preventDefault(); fire(local); } });
 let touch = null; cv.addEventListener('pointerdown', e => { touch = { x: e.clientX, y: e.clientY, t: now() }; });
 cv.addEventListener('pointermove', e => { if (!touch || touch.done) return; const dx = e.clientX - touch.x, dy = e.clientY - touch.y; if (Math.hypot(dx, dy) > 22){ steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3)); touch.done = true; } });
 cv.addEventListener('pointerup', e => { if (!touch) return; if (!touch.done && now() - touch.t < 350) boost(); touch = null; });
 
 // ---------- loop ----------
 let lastT = now();
-function loop(){ const t = now(); let rem = Math.min(1.5, (t - lastT) / 1000); lastT = t; while (rem > 0){ const dt = Math.min(.05, rem); step(dt); rem -= dt; } draw(); tick(); if (t - hudT > 300){ hudT = t; renderHud(); $('boostBar').style.width = (local.cd > t ? Math.max(0, 1 - (local.cd - t) / BOOST_CD) * 100 : 100) + '%'; }
+function loop(){ const t = now(); let rem = Math.min(1.5, (t - lastT) / 1000); lastT = t; while (rem > 0){ const dt = Math.min(.05, rem); step(dt); rem -= dt; } draw(); tick(); if (t - hudT > 300){ hudT = t; renderHud(); $('boostBar').style.width = (local.cd > t ? Math.max(0, 1 - (local.cd - t) / BOOST_CD) * 100 : 100) + '%'; if (mode.combat) $('btnFire').style.opacity = local.fireCd > t ? .35 : 1; }
   if (document.hidden) setTimeout(loop, 40); else requestAnimationFrame(loop); }
 
 // ---------- lobby & ui wiring ----------
@@ -801,6 +887,8 @@ $('btnSwitch').onclick = () => { me.id = null; $('who').classList.add('hidden');
 $('btnRide').onclick = async () => { setRoom($('roomIn').value); $('lobby').classList.add('hidden'); started = true; spawn(local); await publishClaim(); sendLand(true); startBeacon(); clearInterval(liveT); };
 $('roomIn').addEventListener('change', () => setRoom($('roomIn').value)); $('roomIn').addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); setRoom($('roomIn').value); } });
 $('privToggle').onclick = () => setRoom(room.name, { listed: !room.listed });
+$('modeClassic').onclick = () => setMode(false); $('modeCombat').onclick = () => setMode(true);
+$('btnFire').addEventListener('pointerdown', e => { e.preventDefault(); fire(local); });
 $('btnNewRoom').onclick = () => { const words = ['neon', 'sat', 'blake', 'hodl', 'grid', 'block', 'rider', 'tail', 'moon', 'pink', 'cyan', 'plot']; setRoom(words[Math.floor(Math.random() * words.length)] + '-' + Math.random().toString(36).slice(2, 6)); };
 for (const [less, tog, more] of [['botsLess', 'botsLbl', 'botsMore'], ['botsLess2', 'botsLbl2', 'botsMore2']]){ $(less).onclick = () => setBots(botsWanted - 1); $(more).onclick = () => setBots(botsWanted + 1); $(tog).onclick = () => setBots(botsWanted ? 0 : botsLast); }
 $('btnShare').onclick = () => share($('btnShare')); $('btnShare2').onclick = () => share($('btnShare2')); $('btnCopyInvite').onclick = () => share($('btnCopyInvite'));
@@ -815,6 +903,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, inviteUrl, get bots(){ return botsWanted; } };
-syncRoomUI(); syncBotsUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
+window.hodland = { local, players, owner, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), get combat(){ return mode.combat; }, get bots(){ return botsWanted; } };
+syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
