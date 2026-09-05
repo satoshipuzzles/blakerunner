@@ -193,7 +193,12 @@ function ensureDrones(){ const humans = [...players.values()].filter(p => !p.dro
     // object at 0,0 — the whole flock would teleport to the corner the moment anyone took over.
     const had = players.has(dronePk(i)); const d = adoptDrone(i); d.plan = d.plan || [];
     if (!had) spawn(d);
-    drones.push(d); } while (drones.length > want){ const d = drones.pop(); clearLand(d.slot); players.delete(d.pk); } }
+    drones.push(d); } while (drones.length > want){ const d = drones.pop(); clearLand(d.slot); players.delete(d.pk); }
+  // Sweep adopted strays. After a handover, the previous authority's flock sits in `players` but
+  // not in `drones`, so the pop loop above never reaches it — and step() exempts drones from the
+  // stale prune while we drive, so a client that inherited a flock kept driving it forever, even
+  // with bots set to 0 ("drones off but I still see bots").
+  for (const p of [...players.values()]) if (p.drone && drones.indexOf(p) < 0){ clearLand(p.slot); players.delete(p.pk); } }
 const label = p => p.drone ? p.name : nameOf(p.pk);
 function capture(p){
   for (const c of p.tail) owner[c] = p.slot;

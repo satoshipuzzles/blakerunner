@@ -101,3 +101,30 @@ test('a drone index off the wire cannot address a slot outside the flock', () =>
   assert.match(apply, /i < 0 \|\| i >= MAX_BOTS/, 'flock rows must bound-check the drone index');
   assert.ok(MAX_BOTS > 0 && MAX_BOTS <= 16, `MAX_BOTS looks wrong: ${MAX_BOTS}`);
 });
+
+test('an inherited flock is swept when the local bots setting does not want it', () => {
+  // The reported bug: rider A drives 4+ drones, rider B watches with bots=0, A leaves. B becomes
+  // the authority, but the adopted drones live in `players` and not in B's `drones` list — the
+  // pop loop never reached them, step() exempts drones from the stale prune while driving, and
+  // the flock ran forever with no way to turn it off. This drives the real ensureDrones.
+  const dronePk = i => 'drone' + i + '0000000000000000000000000000000000000000000000000000000000';
+  const body = `${lift(['ensureDrones', 'adoptDrone'])}\nensureDrones(); return players;`;
+  const runEnsure = (botsWanted, adopted) => {
+    const players = new Map();
+    const local = { pk: 'me', drone: false };
+    players.set('me', local);
+    for (const i of adopted) players.set(dronePk(i), { pk: dronePk(i), drone: true, i, x: 5, y: 5, plan: [] });
+    return new Function(
+      'players', 'local', 'started', 'now', 'botsWanted', 'drones', 'spawn', 'clearLand', 'dronePk',
+      'mkPlayer', 'DRONE_NAMES', 'PATTERNS', 'MAX_BOTS', body)(
+      players, local, true, () => 0, botsWanted, [], () => {}, () => {}, dronePk,
+      (pk, drone) => { const p = { pk, drone, plan: [] }; players.set(pk, p); return p; },
+      ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], [0], MAX_BOTS);
+  };
+  const off = runEnsure(0, [0, 1, 2, 3]);
+  assert.equal([...off.values()].filter(p => p.drone).length, 0,
+    'bots=0 must remove every adopted drone');
+  const some = runEnsure(2, [0, 1, 2, 3, 4, 5, 6]);
+  const left = [...some.values()].filter(p => p.drone).map(p => p.i).sort();
+  assert.deepEqual(left, [0, 1], 'bots=2 must keep exactly drones 0 and 1 of an inherited seven');
+});
