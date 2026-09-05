@@ -31,13 +31,19 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
 .hud .row b{font-family:var(--mono);margin-left:auto;color:var(--yellow)}
 .hud .row .k{font-family:var(--mono);color:var(--pink);min-width:26px;text-align:right}
 .hud .row.me{border-color:var(--pink)}.hud .row.drone{opacity:.7}
-.feed{position:absolute;left:50%;top:10px;transform:translateX(-50%);display:flex;flex-direction:column;gap:5px;align-items:center;pointer-events:none;width:min(92%,520px)}
+.feed{position:absolute;left:50%;top:52px;transform:translateX(-50%);display:flex;flex-direction:column;gap:5px;align-items:center;pointer-events:none;width:min(92%,520px)}
 .feed div{background:rgba(20,6,48,.85);border:1px solid var(--line2);border-radius:999px;padding:5px 14px;font-size:13px;color:#fff;animation:feedin .25s ease-out;backdrop-filter:blur(6px);text-align:center}
 .feed div.kill{border-color:var(--pink);color:#ffd6e8}.feed div.claim{border-color:var(--green);color:#d8ffe9}.feed div.me{border-color:var(--yellow)}
 @keyframes feedin{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
 .boost{position:absolute;left:50%;bottom:calc(12px + env(safe-area-inset-bottom));transform:translateX(-50%);width:150px;height:7px;background:rgba(255,255,255,.12);border-radius:99px;overflow:hidden;pointer-events:none}
 .fire{position:absolute;right:12px;bottom:calc(160px + env(safe-area-inset-bottom));width:74px;height:74px;border-radius:50%;border:2px solid var(--pink);background:rgba(255,42,140,.2);color:#fff;font-weight:900;font-size:14px;letter-spacing:.08em;cursor:pointer;backdrop-filter:blur(4px);box-shadow:0 0 20px rgba(255,42,140,.5);touch-action:manipulation;z-index:3;font-family:inherit}
 .fire:active{transform:scale(.92)}
+.rampb{position:absolute;left:50%;top:8px;transform:translateX(-50%);z-index:3;pointer-events:none;background:rgba(20,6,48,.9);border:1px solid var(--line2);border-radius:12px;padding:5px 16px;text-align:center;backdrop-filter:blur(6px);white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,.45)}
+.rampb b{font-size:15px;letter-spacing:.03em}
+.rampb .rt{font-family:var(--mono);color:var(--yellow);margin-left:5px}
+.rampb small{display:block;font-size:11.5px;color:var(--ink2);margin-top:1px}
+.rampb.build{border-color:var(--cyan)}.rampb.fortify{border-color:var(--yellow)}.rampb.bombard{border-color:var(--pink)}
+.rampb.hidden{display:none}
 .boost i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--pink));width:100%}
 .tip{position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--muted);background:rgba(20,6,48,.7);padding:6px 10px;border-radius:10px;pointer-events:none}
 .gbtns{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
@@ -110,6 +116,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div class="hud" id="hud"></div>
+  <div id="rampBanner" class="rampb hidden"></div>
   <div class="feed" id="feed"></div>
   <div class="gbtns">
     <button id="btnBoard" class="btn ghost" title="Leaderboard (L)">Leaderboard</button>
@@ -147,6 +154,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
       <label>mode</label>
       <button id="modeClassic" class="tog on" title="Claim land, cut tails — the original game">Classic</button>
       <button id="modeCombat" class="tog" title="Everything in Classic, plus you can shoot riders down — F or the FIRE button fires a bolt">⚔️ Combat</button>
+      <button id="modeRampart" class="tog" title="Build your territory, fortify it with cannons scaled to your land, then bombard rivals — scorched land can't be reclaimed">🏰 Rampart</button>
     </div>
     <div class="roomrow">
       <label for="roomIn">room</label><input id="roomIn" class="room" maxlength="24" placeholder="lobby" autocomplete="off" spellcheck="false">
@@ -159,7 +167,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
       <button id="btnControls" class="btn ghost tiny">Controls</button>
     </div>
     <div class="invite"><span id="inviteUrl"></span> <button id="btnCopyInvite" class="link" style="font-size:12px">copy</button></div>
-    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the mode, the drone count and whether it is listed. Classic and Combat grids with the same name are separate worlds — pick the mode before you ride.</p>
+    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the mode, the drone count and whether it is listed. Classic, Combat and Rampart grids with the same name are separate worlds — pick the mode before you ride. <b>Rampart</b> runs a repeating build → fortify → bombard cycle: claim land, then place cannons scaled to your territory, then shell rivals — scorched cells can't be reclaimed until the next block.</p>
 
     <div class="secth"><h2>Live grids</h2><button id="liveRefresh" class="link" style="font-size:12px">refresh</button></div>
     <div id="liveRooms" class="live"><div class="sys">Asking the relays who is riding…</div></div>
@@ -213,6 +221,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
         <tr><td>claim</td><td>leave your land, loop back in; the tail and everything it encloses is yours</td></tr>
         <tr><td>cut</td><td>cross a rider's tail while they are out and they lose everything</td></tr>
         <tr><td>shoot</td><td>Combat grids: a bolt flies ~20 cells in your heading and wipes out the first rider it touches; kills lead the board</td></tr>
+        <tr><td>rampart</td><td>Rampart grids: cycle through 🏗️ build (ride and claim), 🎯 fortify (tap your own land to place cannons scaled to your territory), 💥 bombard (tap enemy land to shell it). Scorched cells lose their owner and can't be reclaimed — hold the most land when the block lands</td></tr>
         <tr><td>die</td><td>touch your own tail, the edge, or stretch a tail past 500 cells</td></tr>
         <tr><td>round</td><td>one BLAKE2b block; most land when the next block lands wins</td></tr>
       </table></div>
