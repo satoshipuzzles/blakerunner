@@ -115,3 +115,17 @@ test('published events do not carry an h tag', () => {
       `${kind} publishes an 'h' tag — that is NIP-29 group namespace, put app data in the content`);
   }
 });
+
+test('kills and block winners route through the juice layer', () => {
+  // Puzz asked for real kill/winner feedback. Both death paths (locally simulated and the
+  // remote 'die' event) must go through killFx — a second inline burst here is how the remote
+  // path silently loses the shockwave/shake again — and the round-over path must celebrate the
+  // winner in-world, not only in the podium list.
+  assert.equal((race.match(/killFx\(/g) || []).length >= 3, true,
+    'expected killFx defined and called from both death paths');
+  assert.doesNotMatch(race, /c\.t === 'die'\)\{ if \(p\.alive\)\{ p\.alive = false; burst\(/,
+    "the remote 'die' branch must use killFx, not a bare burst");
+  assert.match(race, /celebrateWinner\(rows\[0\], prevHeight\)/,
+    'roundOver must celebrate the block winner');
+  assert.match(race, /shakeUntil > now\(\)/, 'the camera shake must actually be applied in draw');
+});

@@ -225,7 +225,7 @@ function capture(p){
 }
 function die(p, by, why){
   if (!p.alive) return; p.alive = false; p.deaths++; p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set();
-  burst(p.x * CELL, p.y * CELL, colorOf(p, 1), 44);
+  killFx(p, p === local || by === me.sessPub);
   const killer = by && players.get(by); if (killer && killer !== p) killer.kills++;
   const who = label(p); const kn = killer ? label(killer) : null;
   feed(kn ? `${kn} wiped out ${who}` : `${who} ${why || 'wiped out'}`, p === local || by === me.sessPub ? 'kill me' : 'kill');
@@ -270,6 +270,7 @@ function step(dt){
     stepPlayer(p, dt);
   }
   for (const q of parts){ q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 300 * dt; q.life -= dt * 1.4; } for (let i = parts.length - 1; i >= 0; i--) if (parts[i].life <= 0) parts.splice(i, 1);
+  for (const f of floats){ f.y -= 26 * dt; f.life -= dt; } for (let i = floats.length - 1; i >= 0; i--) if (floats[i].life <= 0) floats.splice(i, 1);
   for (const r of rings){ r.r += (r.max - r.r) * dt * 4; r.life -= dt * 1.1; } for (let i = rings.length - 1; i >= 0; i--) if (rings[i].life <= 0) rings.splice(i, 1);
   if (iDrive()) ensureDrones(); else if (drones.length) drones = [];
 }
@@ -379,7 +380,7 @@ function subscribe(){
         if (p.alive && local.alive){ const hc = idx(Math.floor(c.x), Math.floor(c.y)); if (local.tailSet.has(hc)) die(local, p.pk, ''); } }
       else if (e.kind === K_EVT){ p.last = now();
         if (c.t === 'land' && typeof c.rle === 'string' && c.rle.length < 30000) applyRle(p.slot, c.rle);
-        else if (c.t === 'die'){ if (p.alive){ p.alive = false; burst(p.x * CELL, p.y * CELL, colorOf(p, 1), 30); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; feed(kn ? `${kn} wiped out ${nameOf(p.pk)}` : `${nameOf(p.pk)} wiped out`, c.by === me.sessPub ? 'kill me' : 'kill'); } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); if (c.by === me.sessPub) local.kills++; }
+        else if (c.t === 'die'){ if (p.alive){ p.alive = false; killFx(p, c.by === me.sessPub); const kn = c.by && players.get(c.by) ? label(players.get(c.by)) : c.by === me.sessPub ? nameOf(me.sessPub) : null; feed(kn ? `${kn} wiped out ${nameOf(p.pk)}` : `${nameOf(p.pk)} wiped out`, c.by === me.sessPub ? 'kill me' : 'kill'); } p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set(); if (c.by === me.sessPub) local.kills++; }
         else if (c.t === 'dland' && typeof c.rle === 'string' && c.rle.length < 30000){
           if (!iDrive() && e.pubkey === droneAuthority()){ const i = c.i | 0; if (i >= 0 && i < MAX_BOTS) applyRle(adoptDrone(i).slot, c.rle); } }
         else if (c.t === 'kill'){
@@ -486,7 +487,7 @@ function standings(){ landCounts(); return [...players.values()].filter(p => p.d
 const rowHTML = (p, i) => { const href = p.drone ? null : npubLink(p.pk); return `<${href ? `a href="${href}" target="_blank" rel="noopener"` : 'div'} class="p"><span class="mono muted">${i + 1}</span><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}${p.drone ? ' <span class="sub">drone</span>' : ''}</span><b>${pct(p)} · ${p.kills}✂ ${p.deaths}☠</b></${href ? 'a' : 'div'}>`; };
 async function roundOver(prevHeight){
   const rows = standings(); $('podBlock').textContent = prevHeight.toLocaleString(); $('podList').innerHTML = rows.slice(0, 8).map(rowHTML).join('') || '<div class="sys">Nobody rode this block.</div>'; $('podium').classList.remove('hidden');
-  if (rows[0]) feed(`block ${prevHeight.toLocaleString()} goes to ${label(rows[0])} with ${pct(rows[0])}`, 'claim');
+  if (rows[0]){ feed(`block ${prevHeight.toLocaleString()} goes to ${label(rows[0])} with ${pct(rows[0])}`, 'claim'); celebrateWinner(rows[0], prevHeight); }
   if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
   setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); for (const p of players.values()){ p.kills = 0; p.deaths = 0; if (p === local ? started : true) spawn(p); } }, 7000);
 }
@@ -517,9 +518,34 @@ async function career(){
 const cv = $('cv'), cx = cv.getContext('2d'); let vw = 0, vh = 0, dpr = 1;
 function resize(){ dpr = Math.min(2, window.devicePixelRatio || 1); vw = cv.clientWidth; vh = cv.clientHeight; cv.width = vw * dpr; cv.height = vh * dpr; }
 window.addEventListener('resize', resize); resize();
-const cam = { x: W/2, y: H/2 }; const parts = [], rings = [];
+const cam = { x: W/2, y: H/2 }; const parts = [], rings = [], floats = []; let camZoom = 1;
 const colorOf = (p, a) => `hsla(${p.hue},95%,60%,${a})`;
 function burst(x, y, color, n){ for (let i = 0; i < n; i++){ const a = Math.random() * Math.PI * 2, s = 80 + Math.random() * 260; parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, life: .8 + Math.random() * .5, color, sz: 3 + Math.random() * 5 }); } }
+// ---------- juice: shake, floating text, celebrations ----------
+let shakeUntil = 0, shakeAmp = 0;
+// Shake only for kills the local rider is part of: constant shake for other people's fights
+// would read as jank, not impact.
+function kick(amp){ shakeAmp = Math.max(shakeAmp, amp); shakeUntil = now() + 260; }
+function float(x, y, text, color, big = false){ floats.push({ x, y, text, color, big, life: big ? 2.4 : 1.3 }); }
+// A death is the game's loudest beat, so it gets the full stack: two-tone burst, an expanding
+// shockwave ring, and the name drifting up from the wreck.
+function killFx(p, mine){
+  const px = p.x * CELL, py = p.y * CELL;
+  burst(px, py, colorOf(p, 1), 44); burst(px, py, 'rgba(255,255,255,.95)', 18);
+  rings.push({ x: px, y: py, r: 6, max: CELL * 5.5, life: 1, color: colorOf(p, 1) });
+  float(px, py - CELL, `${label(p)} ✂`, colorOf(p, 1));
+  if (mine) kick(7);
+}
+// Block rollover: shower the winner's colours from above the visible sky and stamp the win in
+// the world, not just the podium list.
+function celebrateWinner(p, height){
+  const ww = vw / camZoom, wh = vh / camZoom; // world-units extent of the current view
+  for (let i = 0; i < 130; i++) parts.push({ x: cam.x - ww / 2 + Math.random() * ww, y: cam.y - wh / 2 - Math.random() * 120,
+    vx: (Math.random() - .5) * 120, vy: 60 + Math.random() * 160, life: 1.6 + Math.random() * 1.2,
+    color: `hsla(${(p.hue + (Math.random() * 60 - 30) + 360) % 360},95%,${55 + Math.random() * 25}%,.95)`, sz: 3 + Math.random() * 6 });
+  float(cam.x, cam.y - wh * .18, `👑 ${label(p)} takes block ${height.toLocaleString()}`, colorOf(p, 1), true);
+  if (p === local) kick(6);
+}
 // Territory used to be drawn one canvas call per owned cell, so frame time grew with how much
 // land was on the board — a fully owned grid cost thousands of rects every frame in the world
 // layer and thousands more in the minimap. Both layers now walk rows and emit one rect per
@@ -539,9 +565,13 @@ function ownerRuns(x0, y0, x1, y1, step){
 function draw(){
   const small = vw < 760; const zoom = Math.max(small ? .7 : .55, Math.min(vw / (small ? 900 : 1500), vh / (small ? 700 : 1000), 1)); const tx = started ? local.x * CELL : W/2, ty = started ? local.y * CELL : H/2;
   cam.x += (tx - cam.x) * .12; cam.y += (ty - cam.y) * .12; cam.x = Math.max(vw/2/zoom, Math.min(W - vw/2/zoom, cam.x)); cam.y = Math.max(vh/2/zoom, Math.min(H - vh/2/zoom, cam.y));
+  camZoom = zoom;
+  // Impact shake: a decaying random offset on the camera, only ever kicked by local kills.
+  let shx = 0, shy = 0;
+  if (shakeUntil > now()){ const k = shakeAmp * (shakeUntil - now()) / 260; shx = (Math.random() - .5) * 2 * k; shy = (Math.random() - .5) * 2 * k; } else shakeAmp = 0;
   cx.setTransform(dpr, 0, 0, dpr, 0, 0); cx.clearRect(0, 0, vw, vh);
   const g = cx.createLinearGradient(0, 0, 0, vh); g.addColorStop(0, '#1a0640'); g.addColorStop(1, '#0b0220'); cx.fillStyle = g; cx.fillRect(0, 0, vw, vh);
-  cx.translate(vw/2 - cam.x * zoom, vh/2 - cam.y * zoom); cx.scale(zoom, zoom);
+  cx.translate(vw/2 - cam.x * zoom + shx, vh/2 - cam.y * zoom + shy); cx.scale(zoom, zoom);
   const x0 = Math.max(0, Math.floor((cam.x - vw/2/zoom) / CELL) - 1), x1 = Math.min(COLS, Math.ceil((cam.x + vw/2/zoom) / CELL) + 1), y0 = Math.max(0, Math.floor((cam.y - vh/2/zoom) / CELL) - 1), y1 = Math.min(ROWS, Math.ceil((cam.y + vh/2/zoom) / CELL) + 1);
   const bySlot = new Map(); for (const p of players.values()) bySlot.set(p.slot, p);
   // land: batch runs per player so each fillStyle (pattern) is set once. The per-cell gutter is
@@ -559,6 +589,7 @@ function draw(){
     const [dx, dy] = DIRS[p.d]; cx.fillStyle = '#fff'; cx.beginPath(); cx.arc(px + dx * (R + 5), py + dy * (R + 5), 3, 0, Math.PI * 2); cx.fill();
     cx.fillStyle = 'rgba(255,255,255,.92)'; cx.font = '700 12px sans-serif'; cx.textAlign = 'center'; cx.fillText(label(p), px, py - R - 8); }
   for (const q of parts){ cx.globalAlpha = Math.max(0, Math.min(1, q.life)); cx.fillStyle = q.color; cx.fillRect(q.x - q.sz/2, q.y - q.sz/2, q.sz, q.sz); } cx.globalAlpha = 1;
+  for (const f of floats){ cx.globalAlpha = Math.max(0, Math.min(1, f.life)); cx.fillStyle = f.color; cx.font = `800 ${f.big ? 30 : 14}px sans-serif`; cx.textAlign = 'center'; cx.shadowColor = 'rgba(0,0,0,.7)'; cx.shadowBlur = 8; cx.fillText(f.text, f.x, f.y); cx.shadowBlur = 0; } cx.globalAlpha = 1;
   cx.strokeStyle = `hsl(${hue},100%,60%)`; cx.lineWidth = 6; cx.shadowColor = cx.strokeStyle; cx.shadowBlur = 24; cx.strokeRect(0, 0, W, H); cx.shadowBlur = 0;
   // minimap
   cx.setTransform(dpr, 0, 0, dpr, 0, 0); const mw = small ? 110 : 170, mh = Math.round(mw * ROWS / COLS), mx = vw - mw - 10, my = vh - mh - (small ? 28 : 34); cx.fillStyle = 'rgba(20,6,48,.78)'; cx.fillRect(mx, my, mw, mh); cx.strokeStyle = 'rgba(0,229,255,.5)'; cx.lineWidth = 1; cx.strokeRect(mx, my, mw, mh);
@@ -623,6 +654,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, steer, boost, COLS, ROWS, style, room, setRoom, setBots, inviteUrl, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, inviteUrl, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
