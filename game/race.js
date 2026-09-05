@@ -257,7 +257,12 @@ function step(dt){
       // keep moving between ticks instead of pausing on each one. Extrapolation is capped at
       // 350 ms so a stalled sender drifts to a stop instead of sailing through walls.
       if (p.netAt){ const sp = SPEED * (p.boostUntil > now() ? BOOST : 1); const [ddx, ddy] = DIRS[p.d];
-        const ahead = Math.min((now() - p.netAt) / 1000, .35);
+        // Extrapolate from when the tick was SENT, not when it landed. netAt is arrival, so the
+        // transit time was being rendered as staleness: on coolfeed that is ~65 ms of measured
+        // round trip, half a tick at 10 Hz, and every remote rider sat that far behind where they
+        // actually were. Still capped at 350 ms in total. This is cosmetic only — remote riders
+        // never run stepPlayer(), and collisions read the tick's own x/y, not this glide.
+        const ahead = Math.min((now() - p.netAt + oneWayMs()) / 1000, .35);
         const tx = p.netX + ddx * sp * ahead, ty = p.netY + ddy * sp * ahead;
         const k = Math.min(1, dt * 12); p.x += (tx - p.x) * k; p.y += (ty - p.y) * k; }
       continue; }
@@ -294,8 +299,38 @@ function sendLand(force){ if (!started || !net.ready) return; if (!force && now(
 // each other join and take land but never move. If a tick ever needs the block height, put it
 // in the content — a single-letter tag is relay-reserved namespace, not app scratch space.
 const net = { ready: false, lastTick: 0, sub: null, claimSub: null, gen: 0, retry: null };
+// Ping, measured against nothing but our own clock. Every tick we publish comes straight back to
+// us on our own subscription (measured: 40/40 on coolfeed), so the round trip is
+// publish -> relay -> us, timed with one Date.now() at each end. No peer's created_at is
+// involved, which matters: a rider with a skewed clock would otherwise poison the number, the
+// same trapdoor that made `since` filters black out the grid.
+//
+// Nothing here can grow without bound: an id is dropped the moment it comes back, and anything
+// still outstanding after PING_TIMEOUT is swept on the next tick.
+const PING_TIMEOUT = 5000, PING_SMOOTH = .2;
+const pings = new Map();
+const ping = { ms: 0, lost: 0 };
+function pingSent(id, at){
+  pings.set(id, at);
+  for (const [k, t] of pings) { if (at - t <= PING_TIMEOUT) break; pings.delete(k); ping.lost++; }
+}
+// Only ever called for an event whose id we published, so a replay of one of our own ticks can
+// contribute at most one late sample and then never again.
+function pingEcho(id){
+  const at = pings.get(id); if (at === undefined) return;
+  pings.delete(id);
+  const rtt = now() - at; if (rtt > PING_TIMEOUT) return;
+  ping.ms = ping.ms ? ping.ms + (rtt - ping.ms) * PING_SMOOTH : rtt;
+}
+// Half the round trip is the closest honest estimate of how stale a peer's tick is by the time we
+// draw it, and it is a LOWER bound: a peer's tick travels their leg plus ours, and we can only
+// see ours. Capped so a bad sample can never fling a rider across the grid.
+const oneWayMs = () => Math.min(ping.ms / 2, 150);
 function subscribe(){
   if (net.sub) { try { net.sub.close(); } catch {} } if (net.claimSub) { try { net.claimSub.close(); } catch {} } net.ready = false; $('hRelay').classList.remove('on');
+  // Ticks published against the old subscription will never echo; keeping them would count every
+  // one as lost and hold the map open until the sweep caught up.
+  pings.clear();
   clearTimeout(net.retry); const gen = ++net.gen;
   // Ticks and events are live-only: `limit: 0` instead of a `since`. A client-clock `since` is a
   // trapdoor — a player whose clock runs fast stamps future timestamps but filters on its own
@@ -312,11 +347,18 @@ function subscribe(){
       if (sp && /^[0-9a-f]{64}$/.test(sp) && sp !== me.sessPub){ claims.set(sp, e.pubkey); wantProfile(e.pubkey); } },
   });
   net.sub = pool.subscribeMany(GAME_RELAYS, [{ kinds: [K_TICK, K_EVT], '#t': [roomTag()], limit: 0 }], {
-    onevent: e => { if (!verifyEvent(e)) return;
+    onevent: e => {
+      // Our own events come back to us and were only ever going to be discarded, so discard them
+      // before paying for a signature check — that is a fifth of the verification at two riders
+      // and the whole cost when riding alone. Safe because an impostor stamping our pubkey on an
+      // event lands in exactly the same branch: dropped, unread. It buys them nothing, and
+      // pingEcho only accepts ids we published ourselves.
+      if (e.pubkey === me.sessPub){ pingEcho(e.id); return; }
+      if (!verifyEvent(e)) return;
       // Belt and braces for a relay that ignores `limit: 0`: anything before EOSE is stored
       // history, and a replayed shot or death would be applied as if it just happened.
       if (!net.ready) return;
-      if (e.pubkey === me.sessPub) return; let c; try { c = JSON.parse(e.content); } catch { return; }
+      let c; try { c = JSON.parse(e.content); } catch { return; }
       const fresh = !players.has(e.pubkey); const p = players.get(e.pubkey) || mkPlayer(e.pubkey); if (!claims.has(e.pubkey)) wantProfile(e.pubkey);
       if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); }
       if (e.kind === K_TICK){
@@ -387,7 +429,10 @@ function tick(){ if (!started || !net.ready) return; if (now() - net.lastTick < 
   const flock = iDrive() && drones.length
     ? drones.map(d => [d.i, +d.x.toFixed(2), +d.y.toFixed(2), d.d, d.alive ? 1 : 0, encodeTail(d.tail.slice(-MAX_TAIL))])
     : null;
-  pub(signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], ...(tp === null ? { tl: tail } : { tp }), ...(flock ? { dr: flock, nb: botsWanted } : {}) }) }));
+  // The tick is the ping's carrier: it already goes out on a fixed cadence, so timing its echo
+  // costs one map entry and no extra traffic.
+  const ev = signAsSess({ kind: K_TICK, tags: [['t', roomTag()]], content: JSON.stringify({ x: +local.x.toFixed(2), y: +local.y.toFixed(2), d: local.d, a: local.alive ? 1 : 0, k: local.kills, dd: local.deaths, b: local.boostUntil > now() ? 1 : 0, st: [style.hue, style.pat], ...(tp === null ? { tl: tail } : { tp }), ...(flock ? { dr: flock, nb: botsWanted } : {}) }) });
+  pingSent(ev.id, now()); pub(ev);
   sendLand(false); }
 
 // ---------- rooms: presence beacons and the live-grid list ----------
@@ -524,7 +569,16 @@ function draw(){
   for (const [s, arr] of ownerRuns(0, 0, COLS, ROWS, 2)){ const p = bySlot.get(s); if (!p) continue; cx.fillStyle = colorOf(p, .9); for (let i = 0; i < arr.length; i += 3) cx.fillRect(mx + arr[i] * sx, my + arr[i + 1] * sy, arr[i + 2] * sx, sy * 2); }
   for (const p of players.values()){ if (!p.alive) continue; cx.fillStyle = '#fff'; cx.fillRect(mx + p.x * sx - 2, my + p.y * sy - 2, 4, 4); }
 }
-let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
+// Reads "…" until a tick has been round-tripped, so it never shows a made-up zero. Colour is the
+// same scale the dot uses: green under 100 ms, orange under 250, red past it.
+function renderPing(){
+  const el = $('hPing'); if (!el) return;
+  if (!started || !net.ready || !ping.ms){ el.textContent = '…'; el.style.color = 'var(--muted)'; return; }
+  const ms = Math.round(ping.ms);
+  el.textContent = ms + 'ms';
+  el.style.color = ms < 100 ? 'var(--green)' : ms < 250 ? 'var(--orange)' : 'var(--red)';
+}
+let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; renderPing(); if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
 function feed(msg, cls = ''){ const f = $('feed'); const el = document.createElement('div'); el.className = cls; el.textContent = msg; f.appendChild(el); while (f.children.length > 5) f.firstChild.remove(); setTimeout(() => el.remove(), 4200); }
 
 // ---------- input ----------
