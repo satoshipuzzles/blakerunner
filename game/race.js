@@ -102,6 +102,11 @@ const patCache = new Map();
 function landFill(hue, pat, alpha = .45){
   const key = `${hue}|${pat}|${alpha}`; if (patCache.has(key)) return patCache.get(key);
   const c = document.createElement('canvas'); c.width = c.height = CELL; const x = c.getContext('2d');
+  // The 1px gutter between cells used to come from insetting every per-cell rect. draw() now
+  // fills whole runs of cells in one rect, so the inset lives in the tile instead: the pattern is
+  // anchored to the world origin and repeats every CELL world units, which puts the transparent
+  // margin on exactly the pixels the per-cell inset used to leave bare.
+  x.save(); x.beginPath(); x.rect(.5, .5, CELL - 1, CELL - 1); x.clip();
   x.fillStyle = `hsla(${hue},95%,58%,${alpha})`; x.fillRect(0, 0, CELL, CELL);
   x.fillStyle = `hsla(${hue},100%,80%,${alpha * .9})`; x.strokeStyle = x.fillStyle; x.lineWidth = 2;
   const p = PATTERNS[pat] || 'solid';
@@ -109,6 +114,7 @@ function landFill(hue, pat, alpha = .45){
   else if (p === 'dots'){ x.beginPath(); x.arc(CELL/2, CELL/2, 3.5, 0, Math.PI * 2); x.fill(); }
   else if (p === 'checker'){ x.fillRect(0, 0, CELL/2, CELL/2); x.fillRect(CELL/2, CELL/2, CELL/2, CELL/2); }
   else if (p === 'grid'){ x.strokeRect(1, 1, CELL - 2, CELL - 2); }
+  x.restore();
   const pat2 = cx.createPattern(c, 'repeat'); patCache.set(key, pat2); return pat2;
 }
 function saveStyle(){ localStorage.setItem('br_style', JSON.stringify(style)); local.hue = style.hue; local.pat = style.pat; drawStylePreview(); }
@@ -469,6 +475,22 @@ window.addEventListener('resize', resize); resize();
 const cam = { x: W/2, y: H/2 }; const parts = [], rings = [];
 const colorOf = (p, a) => `hsla(${p.hue},95%,60%,${a})`;
 function burst(x, y, color, n){ for (let i = 0; i < n; i++){ const a = Math.random() * Math.PI * 2, s = 80 + Math.random() * 260; parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, life: .8 + Math.random() * .5, color, sz: 3 + Math.random() * 5 }); } }
+// Territory used to be drawn one canvas call per owned cell, so frame time grew with how much
+// land was on the board — a fully owned grid cost thousands of rects every frame in the world
+// layer and thousands more in the minimap. Both layers now walk rows and emit one rect per
+// horizontal run of same-owner cells. `step` is the sampling stride (1 for the world grid, 2 for
+// the minimap); each run is [x, y, width] in cell units, and a run's height is `step` cells.
+// The trailing flush matters: without it a run touching the right edge is dropped.
+function ownerRuns(x0, y0, x1, y1, step){
+  const runs = new Map();
+  const add = (s, x, y, w) => { let a = runs.get(s); if (!a){ a = []; runs.set(s, a); } a.push(x, y, w); };
+  for (let y = y0; y < y1; y += step){
+    let s = 0, from = x0, x = x0;
+    for (; x < x1; x += step){ const v = owner[idx(x, y)]; if (v === s) continue; if (s) add(s, from, y, x - from); s = v; from = x; }
+    if (s) add(s, from, y, x - from);
+  }
+  return runs;
+}
 function draw(){
   const small = vw < 760; const zoom = Math.max(small ? .7 : .55, Math.min(vw / (small ? 900 : 1500), vh / (small ? 700 : 1000), 1)); const tx = started ? local.x * CELL : W/2, ty = started ? local.y * CELL : H/2;
   cam.x += (tx - cam.x) * .12; cam.y += (ty - cam.y) * .12; cam.x = Math.max(vw/2/zoom, Math.min(W - vw/2/zoom, cam.x)); cam.y = Math.max(vh/2/zoom, Math.min(H - vh/2/zoom, cam.y));
@@ -477,9 +499,10 @@ function draw(){
   cx.translate(vw/2 - cam.x * zoom, vh/2 - cam.y * zoom); cx.scale(zoom, zoom);
   const x0 = Math.max(0, Math.floor((cam.x - vw/2/zoom) / CELL) - 1), x1 = Math.min(COLS, Math.ceil((cam.x + vw/2/zoom) / CELL) + 1), y0 = Math.max(0, Math.floor((cam.y - vh/2/zoom) / CELL) - 1), y1 = Math.min(ROWS, Math.ceil((cam.y + vh/2/zoom) / CELL) + 1);
   const bySlot = new Map(); for (const p of players.values()) bySlot.set(p.slot, p);
-  // land: batch cells per player so each fillStyle (pattern) is set once
-  const runs = new Map(); for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++){ const s = owner[idx(x, y)]; if (!s) continue; let arr = runs.get(s); if (!arr){ arr = []; runs.set(s, arr); } arr.push(x, y); }
-  for (const [s, arr] of runs){ const p = bySlot.get(s); if (!p) continue; cx.fillStyle = landFill(p.hue, p.pat, p.alive ? .5 : .2); cx.beginPath(); for (let i = 0; i < arr.length; i += 2) cx.rect(arr[i] * CELL + .5, arr[i + 1] * CELL + .5, CELL - 1, CELL - 1); cx.fill(); }
+  // land: batch runs per player so each fillStyle (pattern) is set once. The per-cell gutter is
+  // baked into the pattern tile by landFill(), so these rects are flush.
+  const runs = ownerRuns(x0, y0, x1, y1, 1);
+  for (const [s, arr] of runs){ const p = bySlot.get(s); if (!p) continue; cx.fillStyle = landFill(p.hue, p.pat, p.alive ? .5 : .2); cx.beginPath(); for (let i = 0; i < arr.length; i += 3) cx.rect(arr[i] * CELL, arr[i + 1] * CELL, arr[i + 2] * CELL, CELL); cx.fill(); }
   const hue = chain.seed % 360; cx.lineWidth = 1; cx.strokeStyle = `hsla(${(hue + 180) % 360},100%,70%,.10)`; cx.beginPath(); for (let x = x0; x <= x1; x++){ cx.moveTo(x * CELL, y0 * CELL); cx.lineTo(x * CELL, y1 * CELL); } for (let y = y0; y <= y1; y++){ cx.moveTo(x0 * CELL, y * CELL); cx.lineTo(x1 * CELL, y * CELL); } cx.stroke();
   for (const p of players.values()){ if (!p.alive || !p.tail.length) continue; cx.fillStyle = colorOf(p, .9); cx.shadowColor = colorOf(p, 1); cx.shadowBlur = 10; cx.beginPath(); for (const c of p.tail){ const tx2 = c % COLS, ty2 = (c - tx2) / COLS; if (tx2 < x0 || tx2 > x1 || ty2 < y0 || ty2 > y1) continue; cx.rect(tx2 * CELL + 3, ty2 * CELL + 3, CELL - 6, CELL - 6); } cx.fill(); cx.shadowBlur = 0; }
   for (const r of rings){ cx.strokeStyle = r.color; cx.globalAlpha = Math.max(0, r.life) * .9; cx.lineWidth = 4; cx.beginPath(); cx.arc(r.x, r.y, r.r, 0, Math.PI * 2); cx.stroke(); cx.globalAlpha = 1; }
@@ -494,7 +517,11 @@ function draw(){
   cx.strokeStyle = `hsl(${hue},100%,60%)`; cx.lineWidth = 6; cx.shadowColor = cx.strokeStyle; cx.shadowBlur = 24; cx.strokeRect(0, 0, W, H); cx.shadowBlur = 0;
   // minimap
   cx.setTransform(dpr, 0, 0, dpr, 0, 0); const mw = small ? 110 : 170, mh = Math.round(mw * ROWS / COLS), mx = vw - mw - 10, my = vh - mh - (small ? 28 : 34); cx.fillStyle = 'rgba(20,6,48,.78)'; cx.fillRect(mx, my, mw, mh); cx.strokeStyle = 'rgba(0,229,255,.5)'; cx.lineWidth = 1; cx.strokeRect(mx, my, mw, mh);
-  const sx = mw / COLS, sy = mh / ROWS; for (let y = 0; y < ROWS; y += 2) for (let x = 0; x < COLS; x += 2){ const s = owner[idx(x, y)]; if (!s) continue; const p = bySlot.get(s); if (!p) continue; cx.fillStyle = colorOf(p, .9); cx.fillRect(mx + x * sx, my + y * sy, sx * 2, sy * 2); }
+  // The minimap is not viewport-culled, so it was the worse of the two: it walked the whole grid
+  // and rebuilt an hsla() string for Canvas to re-parse on every owned cell. One fillStyle per
+  // rider, one fillRect per run.
+  const sx = mw / COLS, sy = mh / ROWS;
+  for (const [s, arr] of ownerRuns(0, 0, COLS, ROWS, 2)){ const p = bySlot.get(s); if (!p) continue; cx.fillStyle = colorOf(p, .9); for (let i = 0; i < arr.length; i += 3) cx.fillRect(mx + arr[i] * sx, my + arr[i + 1] * sy, arr[i + 2] * sx, sy * 2); }
   for (const p of players.values()){ if (!p.alive) continue; cx.fillStyle = '#fff'; cx.fillRect(mx + p.x * sx - 2, my + p.y * sy - 2, 4, 4); }
 }
 let hudT = 0; function renderHud(){ const rows = standings().slice(0, 8); $('hud').innerHTML = rows.map(p => `<div class="row${p === local ? ' me' : ''}${p.drone ? ' drone' : ''}" data-pk="${p.drone ? '' : p.pk}"><img src="${p.drone ? avatar(p.pk) : picOf(p.pk)}" alt=""><span>${esc(label(p))}</span><span class="k">${p.kills}✂ ${p.deaths}☠</span><b>${pct(p)}</b></div>`).join(''); $('hRiders').textContent = [...players.values()].filter(p => !p.drone && (p === local ? started : now() - p.last < 8000)).length; if (!$('board').classList.contains('hidden')) $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); }
