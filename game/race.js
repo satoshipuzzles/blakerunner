@@ -179,7 +179,7 @@ function clearLand(s){ for (let i = 0; i < owner.length; i++) if (owner[i] === s
 function spawn(p){
   clearLand(p.slot); p.tail = []; p.tailSet = new Set(); p.alive = true; p.boostUntil = 0;
   for (let tries = 0; tries < 300; tries++){ const cx = 5 + Math.floor(Math.random() * (COLS - 10)), cy = 5 + Math.floor(Math.random() * (ROWS - 10)); let free = true; for (let y = -4; y <= 4 && free; y++) for (let x = -4; x <= 4; x++){ const j = idx(cx + x, cy + y); if (owner[j] || scorched[j]){ free = false; break; } }
-    if (free || tries === 299){ for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) owner[idx(cx + x, cy + y)] = p.slot; p.x = cx + .5; p.y = cy + .5; p.cell = idx(cx, cy); p.d = p.nd = Math.floor(Math.random() * 4); p.inside = true; return; } }
+    if (free || tries === 299){ for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++){ const j = idx(cx + x, cy + y); if (!scorched[j]) owner[j] = p.slot; } p.x = cx + .5; p.y = cy + .5; p.cell = idx(cx, cy); p.d = p.nd = Math.floor(Math.random() * 4); p.inside = true; return; } }
 }
 const local = mkPlayer(me.sessPub); local.hue = style.hue; local.pat = style.pat;
 let drones = [];
@@ -435,8 +435,14 @@ function rampartTap(cell){
 // state when build comes back around. Scorched earth is deliberately not cleared here — it lasts
 // until the block resets the board.
 function onRampartPhase(key, prev){
-  if (key === 'fortify'){
+  // Entering any tactical phase from build banks open tails. Done for bombard too, not just
+  // fortify: a suspended tab whose clock jumps build->bombard (skipping fortify) would otherwise
+  // resume frozen with a dangling build tail. Cannons can't be retro-placed for a skipped fortify;
+  // that rider simply has none this cycle and it self-corrects next build.
+  if ((key === 'fortify' || key === 'bombard') && (prev === 'build' || prev === '')){
     for (const p of players.values()) if (p.alive && p.tail.length && (p === local || (p.drone && iDrive()))) capture(p);
+  }
+  if (key === 'fortify'){
     landCounts();
     cannonsAllowed = cannonsFor(local.land); local.cannons = [];
     if (started && local.alive) feed(`fortify — place up to ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'}`, 'claim me');
@@ -654,6 +660,15 @@ function rleMine(s){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < ow
 function applyRle(s, str){ clearLand(s); let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < owner.length; k++){ if (!scorched[i + k]) owner[i + k] = s; } i += n; v ^= 1; } }
 let lastKey = 0;
 function sendLand(force){ if (!started || !net.ready) return; if (!force && now() - lastKey < KEY_MS) return; lastKey = now(); pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'land', rle: rleMine(local.slot) }) })); }
+// Rampart scorched earth is persistent round-state, but booms are live-only ephemerals — a rider
+// joining or reloading mid-round would otherwise start with an empty crater mask, reclaim land
+// every established peer treats as dead, and diverge until the block reset. So the scorched mask
+// is resent as a keyframe (same RLE shape as land) whenever a fresh peer appears. Applying it only
+// ever SETS craters and clears their owner, never un-scorches, so it is safe to receive out of
+// order and idempotent to receive twice.
+function rleScorched(){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < scorched.length; i++){ const v = scorched[i] ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
+function applyScorchedRle(str){ let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < scorched.length; k++){ scorched[i + k] = 1; owner[i + k] = 0; } i += n; v ^= 1; } }
+function sendScorched(){ if (!mode.rampart || !started || !net.ready) return; let any = false; for (let i = 0; i < scorched.length; i++) if (scorched[i]){ any = true; break; } if (!any) return; pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'scorched', rle: rleScorched() }) })); }
 
 // ---------- netcode ----------
 // Ticks carry only their room tag. They also used to carry ['h', block height], which nothing
@@ -725,7 +740,7 @@ function subscribe(){
       if (!net.ready) return;
       let c; try { c = JSON.parse(e.content); } catch { return; }
       const fresh = !players.has(e.pubkey); const p = players.get(e.pubkey) || mkPlayer(e.pubkey); if (!claims.has(e.pubkey)) wantProfile(e.pubkey);
-      if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); }
+      if (fresh){ feed(`${nameOf(e.pubkey)} joined the grid`); sendLand(true); sendScorched(); }
       if (e.kind === K_TICK){
         // The flock rides on the authority's own tick. Ignore it from anyone else, and ignore it
         // entirely while we are the ones driving — otherwise a stale authority's rows fight ours.
@@ -758,6 +773,7 @@ function subscribe(){
           if (Number.isInteger(c.i)){ if (c.i >= 0 && c.i < MAX_BOTS && !iDrive() && e.pubkey === droneAuthority()){ const d = players.get(dronePk(c.i)); spawnBolt(dronePk(c.i), c.x, c.y, c.d & 3, d ? d.hue : 200); } }
           else spawnBolt(e.pubkey, c.x, c.y, c.d & 3, p.hue); }
         else if (c.t === 'boom' && mode.rampart && typeof c.x === 'number' && typeof c.y === 'number' && c.x >= 0 && c.x < COLS && c.y >= 0 && c.y < ROWS){ boom(c.x, c.y, false); }
+        else if (c.t === 'scorched' && mode.rampart && typeof c.rle === 'string' && c.rle.length < 30000){ applyScorchedRle(c.rle); }
         else if (c.t === 'dland' && typeof c.rle === 'string' && c.rle.length < 30000){
           if (!iDrive() && e.pubkey === droneAuthority()){ const i = c.i | 0; if (i >= 0 && i < MAX_BOTS) applyRle(adoptDrone(i).slot, c.rle); } }
         else if (c.t === 'kill'){

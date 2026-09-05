@@ -130,6 +130,31 @@ test('applyRle refuses to paint a slot onto scorched cells', () => {
   for (let i = 10; i < owner.length; i++) assert.equal(owner[i], 5, `unscorched cell ${i} should have been claimed`);
 });
 
+// The scorched keyframe: a fresh joiner reconstructs craters it never saw the booms for. It must
+// round-trip, clear owner where it scorches, and NEVER un-scorch — booms are the only thing that
+// adds craters, and a stale/empty keyframe must not erase them on a peer that is ahead.
+test('the scorched keyframe round-trips and only ever sets craters', () => {
+  const rleSrc = race.match(/function rleScorched\(\)\{[\s\S]*?\n\}/)?.[0];
+  const applySrc = race.match(/function applyScorchedRle\([^)]*\)\{[\s\S]*?\n\}/)?.[0];
+  assert.ok(rleSrc && applySrc, 'rleScorched / applyScorchedRle missing from game/race.js');
+  const craters = [0, 5, 6, 7, 100, 101, COLS * ROWS - 1];
+  const src = new Uint8Array(COLS * ROWS); for (const c of craters) src[c] = 1;
+  const rle = new Function('scorched', `${rleSrc}; return rleScorched;`)(src)();
+  // apply onto a board fully owned by slot 4 with no craters yet
+  const dstScorched = new Uint8Array(COLS * ROWS), dstOwner = new Uint8Array(COLS * ROWS).fill(4);
+  const applyScorchedRle = new Function('scorched', 'owner', `${applySrc}; return applyScorchedRle;`)(dstScorched, dstOwner);
+  applyScorchedRle(rle);
+  const set = new Set(craters);
+  for (let i = 0; i < dstScorched.length; i++){
+    if (set.has(i)){ assert.equal(dstScorched[i], 1, `crater ${i} not reconstructed`); assert.equal(dstOwner[i], 0, `crater ${i} kept its owner`); }
+    else { assert.equal(dstScorched[i], 0, `cell ${i} wrongly scorched`); assert.equal(dstOwner[i], 4, `cell ${i} wrongly cleared`); }
+  }
+  // a later empty keyframe (a peer with no craters) must not erase what we already have
+  const empty = new Function('scorched', `${rleSrc}; return rleScorched;`)(new Uint8Array(COLS * ROWS))();
+  applyScorchedRle(empty);
+  for (const c of craters) assert.equal(dstScorched[c], 1, 'an empty keyframe un-scorched an existing crater');
+});
+
 // A guard that a capture cannot claim scorched interior either — assert the source keeps the check.
 test('capture() keeps its scorched guards so bombarded land stays lost', () => {
   const src = race.match(/function capture\(p\)\{[\s\S]*?\n\}/)?.[0];
