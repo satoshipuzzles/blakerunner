@@ -36,6 +36,8 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
 .feed div.kill{border-color:var(--pink);color:#ffd6e8}.feed div.claim{border-color:var(--green);color:#d8ffe9}.feed div.me{border-color:var(--yellow)}
 @keyframes feedin{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
 .boost{position:absolute;left:50%;bottom:calc(12px + env(safe-area-inset-bottom));transform:translateX(-50%);width:150px;height:7px;background:rgba(255,255,255,.12);border-radius:99px;overflow:hidden;pointer-events:none}
+.fire{position:absolute;right:12px;bottom:calc(160px + env(safe-area-inset-bottom));width:74px;height:74px;border-radius:50%;border:2px solid var(--pink);background:rgba(255,42,140,.2);color:#fff;font-weight:900;font-size:14px;letter-spacing:.08em;cursor:pointer;backdrop-filter:blur(4px);box-shadow:0 0 20px rgba(255,42,140,.5);touch-action:manipulation;z-index:3;font-family:inherit}
+.fire:active{transform:scale(.92)}
 .boost i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--pink));width:100%}
 .tip{position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--muted);background:rgba(20,6,48,.7);padding:6px 10px;border-radius:10px;pointer-events:none}
 .gbtns{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
@@ -118,7 +120,8 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
     <button id="btnLeave" class="btn ghost">Lobby</button>
   </div>
   <div class="boost"><i id="boostBar"></i></div>
-  <div class="tip"><span><b>WASD / ←↑→↓</b> steer</span><span><b>space</b> boost</span><span><b>B</b> drones</span><span><b>[ ]</b> fewer / more</span><span><b>I</b> invite</span><span><b>C</b> controls</span><span><b>L</b> board</span></div>
+  <button id="btnFire" class="fire hidden" aria-label="Fire a bolt">FIRE</button>
+  <div class="tip"><span><b>WASD / ←↑→↓</b> steer</span><span><b>space</b> boost</span><span><b>F</b> fire</span><span><b>B</b> drones</span><span><b>[ ]</b> fewer / more</span><span><b>I</b> invite</span><span><b>C</b> controls</span><span><b>L</b> board</span></div>
   <div id="deadMsg" class="dead hidden"><div>WIPED OUT<small id="deadBy"></small></div></div>
 
   <div id="lobby" class="overlay"><div class="box">
@@ -141,6 +144,11 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
 
     <div class="secth"><h2>Grid</h2></div>
     <div class="roomrow">
+      <label>mode</label>
+      <button id="modeClassic" class="tog on" title="Claim land, cut tails — the original game">Classic</button>
+      <button id="modeCombat" class="tog" title="Everything in Classic, plus you can shoot riders down — F or the FIRE button fires a bolt">⚔️ Combat</button>
+    </div>
+    <div class="roomrow">
       <label for="roomIn">room</label><input id="roomIn" class="room" maxlength="24" placeholder="lobby" autocomplete="off" spellcheck="false">
       <button id="btnNewRoom" class="btn ghost tiny" title="Make a fresh room name">New</button>
       <button id="privToggle" class="tog" title="Private: never listed under live grids; the room name is the secret">Listed</button>
@@ -151,7 +159,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
       <button id="btnControls" class="btn ghost tiny">Controls</button>
     </div>
     <div class="invite"><span id="inviteUrl"></span> <button id="btnCopyInvite" class="link" style="font-size:12px">copy</button></div>
-    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the drone count and whether it is listed. Everyone on the same room tag sees each other.</p>
+    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the mode, the drone count and whether it is listed. Classic and Combat grids with the same name are separate worlds — pick the mode before you ride.</p>
 
     <div class="secth"><h2>Live grids</h2><button id="liveRefresh" class="link" style="font-size:12px">refresh</button></div>
     <div id="liveRooms" class="live"><div class="sys">Asking the relays who is riding…</div></div>
@@ -184,10 +192,12 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
         <tr><td><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>steer (no U-turns: you cannot reverse into your own tail)</td></tr>
         <tr><td><kbd>↑</kbd> <kbd>←</kbd> <kbd>↓</kbd> <kbd>→</kbd></td><td>steer, same as WASD</td></tr>
         <tr><td><kbd>space</kbd></td><td>boost 0.8 s, 3.5 s cooldown (bar at the bottom)</td></tr>
+        <tr><td><kbd>F</kbd></td><td>fire a bolt ahead of you — Combat grids only, 2.5 s cooldown</td></tr>
       </table></div>
       <div><h3>Phone</h3><table>
         <tr><td>swipe</td><td>steer in the swipe direction</td></tr>
         <tr><td>tap</td><td>boost</td></tr>
+        <tr><td>FIRE button</td><td>fire a bolt (Combat grids only)</td></tr>
         <tr><td>home screen</td><td>installable as an app (standalone PWA)</td></tr>
       </table></div>
       <div><h3>Grid</h3><table>
@@ -202,6 +212,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
       <div><h3>How to win</h3><table>
         <tr><td>claim</td><td>leave your land, loop back in; the tail and everything it encloses is yours</td></tr>
         <tr><td>cut</td><td>cross a rider's tail while they are out and they lose everything</td></tr>
+        <tr><td>shoot</td><td>Combat grids: a bolt flies ~20 cells in your heading and wipes out the first rider it touches; kills lead the board</td></tr>
         <tr><td>die</td><td>touch your own tail, the edge, or stretch a tail past 500 cells</td></tr>
         <tr><td>round</td><td>one BLAKE2b block; most land when the next block lands wins</td></tr>
       </table></div>
