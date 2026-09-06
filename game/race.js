@@ -58,7 +58,7 @@ const BOLT_SPEED = 22, BOLT_RANGE = 20, BOLT_HIT_R = .7, FIRE_CD_MS = 2500;
 // worst case is one client scorching a cell a second before another. secs sum to RAMPART_PERIOD.
 const RAMPART_PHASES = [
   { key: 'build',   label: '🏗️ BUILD',   secs: 75, hint: 'ride and claim — fortify soon' },
-  { key: 'fortify', label: '🎯 FORTIFY', secs: 18, hint: 'drag or arrows to look · tap your land to place' },
+  { key: 'fortify', label: '🎯 FORTIFY', secs: 18, hint: 'drag or arrows to look · tap a 2x2 of your land to place cannons' },
   { key: 'bombard', label: '💥 BOMBARD', secs: 18, hint: 'drag or arrows to look · tap enemy land to shell' },
 ];
 const RAMPART_PERIOD = RAMPART_PHASES.reduce((s, p) => s + p.secs, 0);
@@ -372,6 +372,66 @@ function rampartPan(dt){
   if (panKeys.has('arrowup') || panKeys.has('w')) camPan.y -= d;
   clampCamPan();
 }
+// A cannon occupies a CANNON_W x CANNON_H block anchored at its top-left cell, not the single
+// cell it used to be. Everything downstream — placement, pick-up, drawing, and being blown up —
+// reads the footprint through cannonCells(), so the size lives in exactly one place.
+const CANNON_W = 2, CANNON_H = 2;
+// The cells a cannon anchored here would cover, or null if the block will not fit on the board.
+// The bounds check is what stops a cannon anchored in the last column from wrapping its right
+// half onto the next row: idx() is a flat index and cx + 1 would silently become column 0.
+function cannonCells(cell){
+  if (!Number.isInteger(cell) || cell < 0 || cell >= COLS * ROWS) return null;
+  const cx0 = cell % COLS, cy0 = (cell - cx0) / COLS;
+  if (cx0 + CANNON_W > COLS || cy0 + CANNON_H > ROWS) return null;
+  const out = [];
+  for (let y = 0; y < CANNON_H; y++) for (let x = 0; x < CANNON_W; x++) out.push(idx(cx0 + x, cy0 + y));
+  return out;
+}
+// Index of the cannon in `list` whose footprint covers `cell` — a tap anywhere on the block picks
+// it back up, not only the anchor corner.
+function cannonAt(list, cell){
+  return (list || []).findIndex(c => { const cs = cannonCells(c.cell); return cs && cs.includes(cell); });
+}
+// Why this anchor is illegal, or null if it is fine. Returned as the message the rider sees, so
+// the reason a placement bounced is never a silent no-op.
+function cannonBlocked(p, cell){
+  const cs = cannonCells(cell);
+  if (!cs) return 'a cannon needs 2x2 — too close to the edge';
+  for (const i of cs){
+    if (scorched[i]) return 'cannons cannot stand on scorched ground';
+    if (owner[i] !== p.slot) return 'a cannon needs 2x2 of your own land';
+  }
+  if (cs.some(i => cannonAt(p.cannons, i) >= 0)) return 'that overlaps a cannon you already placed';
+  return null;
+}
+// Every legal anchor for this player. Used to tell a rider with no room that they have no room,
+// and to give the drones somewhere valid to stand. O(grid), only ever run once per phase edge.
+function cannonAnchors(p){
+  const out = [];
+  for (let i = 0; i < owner.length; i++) if (owner[i] === p.slot && !cannonBlocked(p, i)) out.push(i);
+  return out;
+}
+// A fresh cannon points at the enemy: the bearing to the nearest cell someone else owns, sampled
+// rather than exhaustive because it only has to look right. Falls back to straight up.
+function cannonAim(p, cell){
+  const cx0 = cell % COLS, cy0 = (cell - cx0) / COLS;
+  let best = Infinity, bx = cx0, by = cy0 - 4;
+  for (let i = 0; i < owner.length; i += 5){
+    const o = owner[i]; if (!o || o === p.slot) continue;
+    const ox = i % COLS, oy = (i - ox) / COLS;
+    const d = (ox - cx0) * (ox - cx0) + (oy - cy0) * (oy - cy0);
+    if (d < best){ best = d; bx = ox; by = oy; }
+  }
+  return Math.atan2(by - cy0, bx - cx0);
+}
+// A cannon standing on ground that has just been scorched is destroyed with it. Called from
+// boom(), so it runs identically on every client from the same event.
+function pruneCannons(){
+  for (const p of players.values()){
+    if (!p.cannons || !p.cannons.length) continue;
+    p.cannons = p.cannons.filter(c => { const cs = cannonCells(c.cell); return cs && !cs.some(i => scorched[i]); });
+  }
+}
 // The blast footprint: a disk of radius BLAST_R around (cx,cy). Owner is cleared and the cell is
 // marked unbuildable. Split out from the fx so it can be tested without a canvas.
 function scorchDisk(cx, cy){
@@ -385,6 +445,9 @@ function scorchDisk(cx, cy){
 }
 function boom(bx, by, mine){
   const cx = Math.floor(bx), cy = Math.floor(by); scorchDisk(cx, cy);
+  // Ground destroyed under a cannon takes the cannon with it. Runs on every client from the same
+  // boom event, so the flock of cannons stays identical everywhere.
+  pruneCannons();
   const px = (cx + .5) * CELL, py = (cy + .5) * CELL;
   burst(px, py, 'rgba(255,150,50,1)', 34); burst(px, py, 'rgba(255,255,255,.9)', 12);
   rings.push({ x: px, y: py, r: 6, max: BLAST_R * CELL * 1.5, life: 1, color: 'hsla(24,100%,60%,1)' });
@@ -395,7 +458,9 @@ function boom(bx, by, mine){
 function launchShell(p, tx, ty){
   const cannon = (p.cannons || []).find(c => !c.fired); if (!cannon) return false;
   cannon.fired = true;
-  const cx0 = cannon.cell % COLS, cy0 = (cannon.cell - cannon.cell % COLS) / COLS;
+  // Muzzle is the centre of the 2x2 block, not the anchor corner, so the shell leaves the barrel.
+  const cx0 = cannon.cell % COLS + (CANNON_W - 1) / 2, cy0 = (cannon.cell - cannon.cell % COLS) / COLS + (CANNON_H - 1) / 2;
+  cannon.aim = Math.atan2(ty - cy0, tx - cx0);
   const mine = p === local || (p.drone && iDrive());
   shells.push({ sx: cx0 + .5, sy: cy0 + .5, tx: tx + .5, ty: ty + .5, x: cx0 + .5, y: cy0 + .5, t: 0, hue: p.hue, mine });
   return true;
@@ -413,9 +478,14 @@ function stepShells(dt){
 const cannonsFor = land => Math.max(1, Math.min(MAX_CANNONS, Math.round(land / CANNON_PER_CELLS)));
 function placeDroneCannons(d){
   const allowed = Math.max(1, Math.min(6, Math.round((d.land || 0) / (CANNON_PER_CELLS * 1.5))));
-  d.cannons = []; const own = [];
-  for (let i = 0; i < owner.length; i++) if (owner[i] === d.slot){ own.push(i); if (own.length > 600) break; }
-  for (let k = 0; k < allowed && own.length; k++) d.cannons.push({ cell: own[Math.floor(Math.random() * own.length)], fired: false });
+  d.cannons = [];
+  // Legal 2x2 anchors only, and re-checked each time so two drone cannons cannot overlap.
+  for (let k = 0; k < allowed; k++){
+    const open = cannonAnchors(d);
+    if (!open.length) break;
+    const cell = open[Math.floor(Math.random() * open.length)];
+    d.cannons.push({ cell, fired: false, aim: cannonAim(d, cell) });
+  }
 }
 // Drones I drive fire at random enemy land during bombard, so a solo grid still gets shelled.
 function droneBombard(){
@@ -445,11 +515,17 @@ function rampartTap(cell){
   if (cell < 0 || !started || !local.alive) return;
   const ph = rampartPhase().key;
   if (ph === 'fortify'){
-    const at = local.cannons.findIndex(c => c.cell === cell);
+    // A tap anywhere on the 2x2 picks the cannon back up, so you are never fighting to hit the
+    // anchor corner.
+    const at = cannonAt(local.cannons, cell);
     if (at >= 0){ local.cannons.splice(at, 1); return; }
-    if (owner[cell] !== local.slot){ feed('place cannons on your own land', 'kill'); return; }
     if (local.cannons.length >= cannonsAllowed){ feed(`only ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'} this round`, 'kill'); return; }
-    local.cannons.push({ cell, fired: false });
+    // Anchor the block so the tapped cell is inside it where that is legal: tapping the middle of
+    // your land should place, not bounce because the block happened to extend the wrong way.
+    const anchor = [cell, cell - 1, cell - COLS, cell - COLS - 1]
+      .find(a => a >= 0 && !cannonBlocked(local, a));
+    if (anchor === undefined){ feed(cannonBlocked(local, cell) || 'no room for a cannon there', 'kill'); return; }
+    local.cannons.push({ cell: anchor, fired: false, aim: cannonAim(local, anchor) });
   } else if (ph === 'bombard'){
     if (scorched[cell]) return;
     if (owner[cell] === local.slot || owner[cell] === 0){ feed('aim at enemy land', 'kill'); return; }
@@ -471,7 +547,13 @@ function onRampartPhase(key, prev){
   if (key === 'fortify'){
     landCounts();
     cannonsAllowed = cannonsFor(local.land); local.cannons = [];
-    if (started && local.alive) feed(`fortify — place up to ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'}`, 'claim me');
+    if (started && local.alive){
+      // A cannon now needs a 2x2 of your own land. A thin or shattered holding can have plenty of
+      // cells and nowhere legal to stand, so say so instead of bouncing every tap.
+      const room = cannonAnchors(local).length;
+      if (!room) feed('no room for a cannon — you need 2x2 of unscorched land', 'kill');
+      else feed(`fortify — place up to ${Math.min(cannonsAllowed, room)} cannon${Math.min(cannonsAllowed, room) === 1 ? '' : 's'}`, 'claim me');
+    }
     if (iDrive()) for (const d of drones) placeDroneCannons(d);
   } else if (key === 'bombard'){
     if (started && local.alive) feed('bombard — tap enemy land to shell it', 'kill me');
@@ -1015,6 +1097,39 @@ function maskRuns(mask, x0, y0, x1, y1, step){
   }
   return out;
 }
+// An emplacement filling the whole 2x2: a dark bunker pad with the owner's colour on its rim, a
+// rotating barrel pointing at whatever the cannon is aimed at, and a hot muzzle while it is still
+// loaded. A fired cannon goes cold grey and drops its glow, so "who still has a shot" reads off
+// the board at a glance instead of off the banner.
+function drawCannon(p, cn, ccx, ccy){
+  const w = CANNON_W * CELL, h = CANNON_H * CELL;
+  const gx = ccx * CELL + w / 2, gy = ccy * CELL + h / 2;   // centre of the block
+  const live = !cn.fired, col = live ? colorOf(p, 1) : 'rgba(150,150,168,.9)';
+  const m = Math.min(w, h), hub = m * .22, barrel = m * .48;
+  cx.save(); cx.translate(gx, gy);
+  // bunker pad
+  cx.fillStyle = 'rgba(10,3,26,.92)'; cx.strokeStyle = col; cx.lineWidth = 2.5;
+  cx.beginPath(); cx.roundRect(-w / 2 + 3, -h / 2 + 3, w - 6, h - 6, 6); cx.fill(); cx.stroke();
+  // corner rivets, so the block reads as built rather than as a coloured square
+  cx.fillStyle = col;
+  for (const [rx, ry] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]){
+    cx.beginPath(); cx.arc(rx * (w / 2 - 8), ry * (h / 2 - 8), 1.8, 0, Math.PI * 2); cx.fill();
+  }
+  cx.rotate(typeof cn.aim === 'number' ? cn.aim : -Math.PI / 2);
+  // barrel
+  cx.fillStyle = live ? 'rgba(24,8,52,1)' : 'rgba(38,38,48,1)';
+  cx.strokeStyle = col; cx.lineWidth = 2;
+  cx.beginPath(); cx.roundRect(hub * .3, -m * .09, barrel, m * .18, 3); cx.fill(); cx.stroke();
+  if (live){ cx.fillStyle = col; cx.shadowColor = col; cx.shadowBlur = 14;
+    cx.beginPath(); cx.arc(hub * .3 + barrel, 0, m * .085, 0, Math.PI * 2); cx.fill(); cx.shadowBlur = 0; }
+  cx.rotate(-(typeof cn.aim === 'number' ? cn.aim : -Math.PI / 2));
+  // turret hub over the barrel root
+  cx.fillStyle = col; cx.strokeStyle = 'rgba(0,0,0,.75)'; cx.lineWidth = 2;
+  cx.beginPath(); cx.arc(0, 0, hub, 0, Math.PI * 2); cx.fill(); cx.stroke();
+  cx.fillStyle = 'rgba(10,3,26,.9)';
+  cx.beginPath(); cx.arc(0, 0, hub * .5, 0, Math.PI * 2); cx.fill();
+  cx.restore();
+}
 function draw(){
   const small = vw < 760; const zoom = Math.max(small ? .7 : .55, Math.min(vw / (small ? 900 : 1500), vh / (small ? 700 : 1000), 1)); const tx = started ? local.x * CELL + camPan.x : W/2, ty = started ? local.y * CELL + camPan.y : H/2;
   cam.x += (tx - cam.x) * .12; cam.y += (ty - cam.y) * .12; cam.x = Math.max(vw/2/zoom, Math.min(W - vw/2/zoom, cam.x)); cam.y = Math.max(vh/2/zoom, Math.min(H - vh/2/zoom, cam.y));
@@ -1043,11 +1158,8 @@ function draw(){
   cx.lineCap = 'butt';
   if (mode.rampart){
     for (const p of players.values()){ if (!p.cannons || !p.cannons.length) continue;
-      for (const cn of p.cannons){ const ccx = cn.cell % COLS, ccy = (cn.cell - cn.cell % COLS) / COLS; if (ccx < x0 || ccx > x1 || ccy < y0 || ccy > y1) continue;
-        const gx = (ccx + .5) * CELL, gy = (ccy + .5) * CELL, r = CELL * .34;
-        cx.fillStyle = '#12042a'; cx.fillRect(gx - 2.5, gy - CELL * .55, 5, CELL * .55);
-        cx.fillStyle = cn.fired ? 'rgba(120,120,140,.85)' : colorOf(p, 1); cx.strokeStyle = 'rgba(0,0,0,.7)'; cx.lineWidth = 2;
-        cx.beginPath(); cx.arc(gx, gy, r, 0, Math.PI * 2); cx.fill(); cx.stroke(); } }
+      for (const cn of p.cannons){ const ccx = cn.cell % COLS, ccy = (cn.cell - cn.cell % COLS) / COLS; if (ccx + CANNON_W < x0 || ccx > x1 || ccy + CANNON_H < y0 || ccy > y1) continue;
+        drawCannon(p, cn, ccx, ccy); } }
     for (const s of shells){ const sx2 = s.x * CELL, sy2 = s.y * CELL; cx.fillStyle = `hsla(${s.hue},100%,72%,1)`; cx.shadowColor = cx.fillStyle; cx.shadowBlur = 16; cx.beginPath(); cx.arc(sx2, sy2, 5, 0, Math.PI * 2); cx.fill(); cx.shadowBlur = 0; }
   }
   for (const p of players.values()){ if (!p.alive) continue; const px = p.x * CELL, py = p.y * CELL, R = CELL * .62;
@@ -1159,6 +1271,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, CANNON_W, CANNON_H, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);

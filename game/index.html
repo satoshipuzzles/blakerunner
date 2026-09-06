@@ -167,7 +167,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
       <button id="btnControls" class="btn ghost tiny">Controls</button>
     </div>
     <div class="invite"><span id="inviteUrl"></span> <button id="btnCopyInvite" class="link" style="font-size:12px">copy</button></div>
-    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the mode, the drone count and whether it is listed. Classic, Combat and Rampart grids with the same name are separate worlds — pick the mode before you ride. <b>Rampart</b> runs a repeating build → fortify → bombard cycle: claim land, then place cannons scaled to your territory, then shell rivals — scorched cells can't be reclaimed until the next block.</p>
+    <p class="muted small" style="margin:4px 0 0">A grid is a name two riders agreed on. The invite link carries the room, the mode, the drone count and whether it is listed. Classic, Combat and Rampart grids with the same name are separate worlds — pick the mode before you ride. <b>Rampart</b> runs a repeating build → fortify → bombard cycle: claim land, then place 2x2 cannon emplacements scaled to your territory, then shell rivals — scorched cells can't be reclaimed until the next block.</p>
 
     <div class="secth"><h2>Live grids</h2><button id="liveRefresh" class="link" style="font-size:12px">refresh</button></div>
     <div id="liveRooms" class="live"><div class="sys">Asking the relays who is riding…</div></div>
@@ -222,7 +222,7 @@ input.room{background:rgba(0,0,0,.35);border:1px solid var(--line2);color:#fff;p
         <tr><td>claim</td><td>leave your land, loop back in; the tail and everything it encloses is yours</td></tr>
         <tr><td>cut</td><td>cross a rider's tail while they are out and they lose everything</td></tr>
         <tr><td>shoot</td><td>Combat grids: a bolt flies ~20 cells in your heading and wipes out the first rider it touches; kills lead the board</td></tr>
-        <tr><td>rampart</td><td>Rampart grids: cycle through 🏗️ build (ride and claim), 🎯 fortify (tap your own land to place cannons scaled to your territory), 💥 bombard (tap enemy land to shell it). Scorched cells lose their owner and can't be reclaimed — hold the most land when the block lands</td></tr>
+        <tr><td>rampart</td><td>Rampart grids: cycle through 🏗️ build (ride and claim), 🎯 fortify (tap a 2x2 block of your own land to place cannons scaled to your territory; a tap on a placed cannon picks it back up), 💥 bombard (tap enemy land to shell it). Scorched cells lose their owner and can't be reclaimed — hold the most land when the block lands</td></tr>
         <tr><td>die</td><td>touch your own tail, the edge, or stretch a tail past 500 cells</td></tr>
         <tr><td>round</td><td>one BLAKE2b block; most land when the next block lands wins</td></tr>
       </table></div>
