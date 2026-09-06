@@ -58,8 +58,8 @@ const BOLT_SPEED = 22, BOLT_RANGE = 20, BOLT_HIT_R = .7, FIRE_CD_MS = 2500;
 // worst case is one client scorching a cell a second before another. secs sum to RAMPART_PERIOD.
 const RAMPART_PHASES = [
   { key: 'build',   label: '🏗️ BUILD',   secs: 75, hint: 'ride and claim — fortify soon' },
-  { key: 'fortify', label: '🎯 FORTIFY', secs: 18, hint: 'tap your land to place cannons' },
-  { key: 'bombard', label: '💥 BOMBARD', secs: 18, hint: 'tap enemy land to bombard it' },
+  { key: 'fortify', label: '🎯 FORTIFY', secs: 18, hint: 'drag or arrows to look · tap your land to place' },
+  { key: 'bombard', label: '💥 BOMBARD', secs: 18, hint: 'drag or arrows to look · tap enemy land to shell' },
 ];
 const RAMPART_PERIOD = RAMPART_PHASES.reduce((s, p) => s + p.secs, 0);
 // A cannon per ~2% of the grid held at fortify, capped; the blast is a small disk of scorched
@@ -346,6 +346,32 @@ function stepBolts(dt){
 // scorched cells and the ownership they clear are identical everywhere without a second authority.
 const shells = [];
 let cannonsAllowed = 0, rampPhaseKey = '';
+// Tactical camera. The rider is frozen during fortify and bombard, and the camera is otherwise
+// welded to it, so on a phone only ~10% of the grid was ever reachable: you could not aim at a
+// rival whose land was off-screen. camPan is a world-pixel offset added to the camera's target
+// during those phases and zeroed when build comes back, so the ride itself is untouched.
+const camPan = { x: 0, y: 0 };
+const PAN_KEY_SPEED = 900; // world px/s while an arrow is held
+const panKeys = new Set();
+// The pan may not push the camera target outside the grid. Anchor is the frozen rider, so the
+// legal offset range is exactly [-anchor, world - anchor] — pure, so it can be tested.
+const clampPan = (v, anchorPx, worldPx) => Math.max(-anchorPx, Math.min(worldPx - anchorPx, v));
+function clampCamPan(){
+  camPan.x = clampPan(camPan.x, local.x * CELL, W);
+  camPan.y = clampPan(camPan.y, local.y * CELL, H);
+}
+// Held-key panning, stepped from the frame's own elapsed time rather than the OS key-repeat rate:
+// repeat has a ~500 ms lead-in that makes a nudge feel broken.
+function rampartPan(dt){
+  if (!rampTactical()){ panKeys.clear(); return; }
+  if (!panKeys.size) return;
+  const d = PAN_KEY_SPEED * dt;
+  if (panKeys.has('arrowright') || panKeys.has('d')) camPan.x += d;
+  if (panKeys.has('arrowleft') || panKeys.has('a')) camPan.x -= d;
+  if (panKeys.has('arrowdown') || panKeys.has('s')) camPan.y += d;
+  if (panKeys.has('arrowup') || panKeys.has('w')) camPan.y -= d;
+  clampCamPan();
+}
 // The blast footprint: a disk of radius BLAST_R around (cx,cy). Owner is cleared and the cell is
 // marked unbuildable. Split out from the fx so it can be tested without a canvas.
 function scorchDisk(cx, cy){
@@ -453,6 +479,7 @@ function onRampartPhase(key, prev){
   } else if (key === 'build'){
     for (const p of players.values()) p.cannons = [];
     shells.length = 0;
+    camPan.x = camPan.y = 0; panKeys.clear();
     if (started && prev) feed('build — claim while you can', 'claim');
   }
 }
@@ -989,7 +1016,7 @@ function maskRuns(mask, x0, y0, x1, y1, step){
   return out;
 }
 function draw(){
-  const small = vw < 760; const zoom = Math.max(small ? .7 : .55, Math.min(vw / (small ? 900 : 1500), vh / (small ? 700 : 1000), 1)); const tx = started ? local.x * CELL : W/2, ty = started ? local.y * CELL : H/2;
+  const small = vw < 760; const zoom = Math.max(small ? .7 : .55, Math.min(vw / (small ? 900 : 1500), vh / (small ? 700 : 1000), 1)); const tx = started ? local.x * CELL + camPan.x : W/2, ty = started ? local.y * CELL + camPan.y : H/2;
   cam.x += (tx - cam.x) * .12; cam.y += (ty - cam.y) * .12; cam.x = Math.max(vw/2/zoom, Math.min(W - vw/2/zoom, cam.x)); cam.y = Math.max(vh/2/zoom, Math.min(H - vh/2/zoom, cam.y));
   camZoom = zoom;
   // Impact shake: a decaying random offset on the camera, only ever kicked by local kills.
@@ -1072,17 +1099,37 @@ window.addEventListener('keydown', e => { if (e.target && /^(INPUT|TEXTAREA)$/.t
   if (k === 'escape'){ for (const id of ['board', 'styleBox', 'controls']) $(id).classList.add('hidden'); return; }
   if (k === 'b'){ setBots(botsWanted ? 0 : botsLast); return; } if (k === '['){ setBots(botsWanted - 1); return; } if (k === ']'){ setBots(botsWanted + 1); return; }
   if (k === 'c'){ $('controls').classList.toggle('hidden'); return; } if (k === 'l'){ $('board').classList.toggle('hidden'); if (!$('board').classList.contains('hidden')){ $('boardNow').innerHTML = standings().slice(0, 12).map(rowHTML).join(''); career(); } return; } if (k === 'i'){ share($('btnShare')); return; }
-  if (!started || rampTactical()) return; const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 }; if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } if (k === 'f'){ e.preventDefault(); fire(local); } });
-let touch = null; cv.addEventListener('pointerdown', e => { touch = { x: e.clientX, y: e.clientY, t: now() }; });
-// Steering swipes are off during the frozen tactical phases; a tap there places or fires instead.
-cv.addEventListener('pointermove', e => { if (!touch || touch.done || rampTactical()) return; const dx = e.clientX - touch.x, dy = e.clientY - touch.y; if (Math.hypot(dx, dy) > 22){ steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3)); touch.done = true; } });
+  if (!started) return;
+  const map = { arrowright: 0, d: 0, arrowdown: 1, s: 1, arrowleft: 2, a: 2, arrowup: 3, w: 3 };
+  // Frozen phases: the same keys look around instead of steering. Held in a set and stepped by
+  // rampartPan() from the loop, so a held arrow scrolls smoothly.
+  if (rampTactical()){ if (k in map){ e.preventDefault(); panKeys.add(k); } return; }
+  if (k in map){ e.preventDefault(); steer(map[k]); } if (k === ' '){ e.preventDefault(); boost(); } if (k === 'f'){ e.preventDefault(); fire(local); } });
+window.addEventListener('keyup', e => panKeys.delete(e.key.toLowerCase()));
+// A key held while the tab loses focus never delivers its keyup, and the view would scroll forever.
+window.addEventListener('blur', () => panKeys.clear());
+let touch = null;
+cv.addEventListener('pointerdown', e => { touch = { x: e.clientX, y: e.clientY, px: e.clientX, py: e.clientY, t: now() };
+  // Capture only for the tactical drag: a pan that leaves the canvas should keep panning, but the
+  // steering path is left exactly as it was.
+  if (rampTactical()){ try { cv.setPointerCapture(e.pointerId); } catch {} } });
+// Build: a swipe steers. Tactical: a drag pans the view and a tap places or fires.
+cv.addEventListener('pointermove', e => { if (!touch) return;
+  if (rampTactical()){
+    if (!touch.done && Math.hypot(e.clientX - touch.x, e.clientY - touch.y) > 22) touch.done = true;
+    // Drag the world with the finger, so the camera moves against it. Divided by the zoom so a
+    // pan tracks the finger 1:1 on screen whatever the scale.
+    if (touch.done){ camPan.x -= (e.clientX - touch.px) / camZoom; camPan.y -= (e.clientY - touch.py) / camZoom; clampCamPan(); }
+    touch.px = e.clientX; touch.py = e.clientY; return;
+  }
+  if (touch.done) return; const dx = e.clientX - touch.x, dy = e.clientY - touch.y; if (Math.hypot(dx, dy) > 22){ steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3)); touch.done = true; } });
 cv.addEventListener('pointerup', e => { if (!touch) return; const wasTap = !touch.done && now() - touch.t < 350;
-  if (rampTactical()){ if (wasTap) rampartTap(cellAt(e.clientX, e.clientY)); touch = null; return; }
+  if (rampTactical()){ try { cv.releasePointerCapture(e.pointerId); } catch {} if (wasTap) rampartTap(cellAt(e.clientX, e.clientY)); touch = null; return; }
   if (wasTap) boost(); touch = null; });
 
 // ---------- loop ----------
 let lastT = now();
-function loop(){ const t = now(); let rem = Math.min(1.5, (t - lastT) / 1000); lastT = t; while (rem > 0){ const dt = Math.min(.05, rem); step(dt); rem -= dt; } rampartTick(); draw(); tick(); if (t - hudT > 300){ hudT = t; renderHud(); $('boostBar').style.width = (local.cd > t ? Math.max(0, 1 - (local.cd - t) / BOOST_CD) * 100 : 100) + '%'; if (mode.combat) $('btnFire').style.opacity = local.fireCd > t ? .35 : 1; }
+function loop(){ const t = now(); let rem = Math.min(1.5, (t - lastT) / 1000); lastT = t; const frameSecs = rem; while (rem > 0){ const dt = Math.min(.05, rem); step(dt); rem -= dt; } rampartPan(frameSecs); rampartTick(); draw(); tick(); if (t - hudT > 300){ hudT = t; renderHud(); $('boostBar').style.width = (local.cd > t ? Math.max(0, 1 - (local.cd - t) / BOOST_CD) * 100 : 100) + '%'; if (mode.combat) $('btnFire').style.opacity = local.fireCd > t ? .35 : 1; }
   if (document.hidden) setTimeout(loop, 40); else requestAnimationFrame(loop); }
 
 // ---------- lobby & ui wiring ----------
@@ -1112,6 +1159,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
