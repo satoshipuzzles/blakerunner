@@ -33,8 +33,10 @@ test('the phase clock partitions its period with no gap or overlap', () => {
   // and `left` must count down to 1 at the last second of each phase.
   const seen = [];
   for (let s = 0; s < PERIOD; s++){
-    const fakeDate = { now: () => s * 1000 };
-    const rampartPhase = lift(['RAMPART_PHASES', 'RAMPART_PERIOD', 'Date'], src, 'rampartPhase')(PHASES, PERIOD, fakeDate);
+    // rampartPhase now reads syncedNow() — the browser clock corrected against the server's — so
+    // the stub is injected there rather than on Date. See test/rampart-clock.test.mjs for the
+    // correction itself.
+    const rampartPhase = lift(['RAMPART_PHASES', 'RAMPART_PERIOD', 'syncedNow'], src, 'rampartPhase')(PHASES, PERIOD, () => s * 1000);
     const ph = rampartPhase();
     assert.ok(ph && typeof ph.key === 'string', `second ${s} produced no phase`);
     assert.ok(ph.left >= 1 && ph.left <= PHASES.find(p => p.key === ph.key).secs, `second ${s}: left ${ph.left} out of range`);
@@ -46,7 +48,7 @@ test('the phase clock partitions its period with no gap or overlap', () => {
   assert.deepEqual(seen, expected, 'phases do not tile the period in order');
   // And it wraps: one period later is the same phase.
   const src2 = src;
-  const at = t => lift(['RAMPART_PHASES', 'RAMPART_PERIOD', 'Date'], src2, 'rampartPhase')(PHASES, PERIOD, { now: () => t * 1000 })().key;
+  const at = t => lift(['RAMPART_PHASES', 'RAMPART_PERIOD', 'syncedNow'], src2, 'rampartPhase')(PHASES, PERIOD, () => t * 1000)().key;
   assert.equal(at(3), at(3 + PERIOD), 'the cycle does not repeat across the period boundary');
 });
 

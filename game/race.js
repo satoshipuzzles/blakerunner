@@ -52,6 +52,23 @@ const SPEED = 7.5, BOOST = 1.6, BOOST_MS = 800, BOOST_CD = 3500, TICK_HZ = 10, K
 // Combat bolts: ~3x rider speed so they are dodgeable at range and lethal up close, range capped
 // so a bolt is a duel, not cross-map artillery. The cooldown keeps land-claiming the core game.
 const BOLT_SPEED = 22, BOLT_RANGE = 20, BOLT_HIT_R = .7, FIRE_CD_MS = 2500;
+// The browser's clock, corrected against the server's. Rampart derives its phase from wall time
+// with no coordinating event, and the tactical phases are only 18 seconds each — so a rider whose
+// clock is 18s out has ZERO overlap with everyone else's fortify and bombard and is bombarding
+// while the rest of the grid is building. Browser clocks tens of seconds out are ordinary.
+//
+// The reference is free and already in the plumbing: pollChain fetches /mp/blocks/tip/height every
+// 20s, and /mp/* is a same-origin vercel rewrite, so every response header is readable with no CORS
+// and no extra request. The `date` header is an HTTP-date, so this is accurate to about a second
+// plus the round trip, against phases measured in tens of seconds. If the header is ever missing or
+// unparseable the offset stays 0 and the clock is exactly the browser's, as before.
+let clockSkew = 0;
+const syncedNow = () => Date.now() + clockSkew;
+function readServerClock(res){
+  const d = Date.parse(res && res.headers ? res.headers.get('date') || '' : '');
+  if (Number.isFinite(d)) clockSkew = d - Date.now();
+  return clockSkew;
+}
 // Rampart: a build -> fortify -> bombard cycle on a fixed wall-clock, so every client derives the
 // same phase from Date.now() with no server and no coordinating event. A few seconds of clock skew
 // only shifts a peer's transition by that much, and the phase never gates a collision — the
@@ -82,10 +99,11 @@ const RAMPART_PERIOD = RAMPART_PHASES.reduce((s, p) => s + p.secs, 0);
 // second, ~16 is the most a rider can physically place. Raising it means lengthening the phase.
 // The two dials are MAX_CANNONS and CANNON_CURVE; nothing else needs touching to retune this.
 const MAX_CANNONS = 16, CANNON_CURVE = .65, DRONE_CANNON_SCALE = .7, BLAST_R = 3.2, SHELL_MS = 620;
-// The current phase is a pure function of the wall clock: floor the epoch seconds into the
-// repeating period and walk the table. `left` is seconds remaining in this phase.
+// The current phase is a pure function of the SERVER-corrected wall clock: floor the epoch seconds
+// into the repeating period and walk the table. `left` is seconds remaining in this phase. Using
+// syncedNow() rather than Date.now() is what keeps riders on the same phase — see readServerClock.
 function rampartPhase(){
-  const t = Math.floor(Date.now() / 1000) % RAMPART_PERIOD;
+  const t = Math.floor(syncedNow() / 1000) % RAMPART_PERIOD;
   let acc = 0;
   for (const ph of RAMPART_PHASES){ if (t < acc + ph.secs) return { ...ph, left: acc + ph.secs - t }; acc += ph.secs; }
   return { ...RAMPART_PHASES[0], left: 0 };
@@ -177,7 +195,7 @@ function drawStylePreview(){ const c = $('stylePreview'); const x = c.getContext
 // ---------- block clock ----------
 const chain = { height: 0, hash: '', time: 0, seed: 1 };
 async function pollChain(){
-  try { const h = Number(await fetch(MEMPOOL + '/blocks/tip/height', { cache: 'no-store' }).then(r => r.text())); const hash = (await fetch(MEMPOOL + '/blocks/tip/hash', { cache: 'no-store' }).then(r => r.text())).trim();
+  try { const tipRes = await fetch(MEMPOOL + '/blocks/tip/height', { cache: 'no-store' }); readServerClock(tipRes); const h = Number(await tipRes.text()); const hash = (await fetch(MEMPOOL + '/blocks/tip/hash', { cache: 'no-store' }).then(r => r.text())).trim();
     if (h && hash && h !== chain.height){ const prev = chain.height; chain.height = h; chain.hash = hash; chain.seed = parseInt(hash.slice(-8), 16) || 1; const b = await fetch(MEMPOOL + '/block/' + hash).then(r => r.json()).catch(() => null); chain.time = b?.timestamp || Math.floor(Date.now()/1000); $('hBlock').textContent = h.toLocaleString(); if (prev) roundOver(prev); } } catch (e) { console.warn('chain', e); }
 }
 setInterval(() => { if (!chain.time) return; const s = Math.max(0, 600 - (Date.now()/1000 - chain.time)); $('hClock').textContent = s > 0 ? `~${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2, '0')}` : 'any second'; }, 1000);
@@ -1302,6 +1320,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, CANNON_W, CANNON_H, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, CANNON_W, CANNON_H, readServerClock, syncedNow, get clockSkew(){ return clockSkew; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
