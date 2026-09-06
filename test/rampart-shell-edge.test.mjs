@@ -36,8 +36,8 @@ const buildBody = (() => {
   const after = onPhase.slice(onPhase.indexOf(MARK) + MARK.length);
   return after.slice(0, after.indexOf('\n  }'));
 })();
-const applyBuildEdge = shells => new Function('shells', 'players', 'feed', 'started', 'prev', buildBody)(
-  shells, new Map(), () => {}, true, 'bombard');
+const applyBuildEdge = shells => new Function('shells', 'players', 'feed', 'started', 'prev', 'camPan', 'panKeys', buildBody)(
+  shells, new Map(), () => {}, true, 'bombard', { x: 0, y: 0 }, new Set());
 
 test('the phase edge no longer discards shells in flight', () => {
   assert.doesNotMatch(buildBranch, /shells\.length = 0/,
