@@ -826,7 +826,17 @@ function sendLand(force){ if (!started || !net.ready) return; if (!force && now(
 // order and idempotent to receive twice.
 function rleScorched(){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < scorched.length; i++){ const v = scorched[i] ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
 function applyScorchedRle(str){ let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < scorched.length; k++){ scorched[i + k] = 1; owner[i + k] = 0; } i += n; v ^= 1; } }
-function sendScorched(){ if (!mode.rampart || !started || !net.ready) return; let any = false; for (let i = 0; i < scorched.length; i++) if (scorched[i]){ any = true; break; } if (!any) return; pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'scorched', rle: rleScorched() }) })); }
+// The scorched keyframe, sent so a rider joining mid-round reconstructs craters instead of
+// reclaiming land everyone else treats as dead. It carries the block height it describes, and the
+// receiver drops anything that is not about the round it is currently playing.
+//
+// Without that stamp it was a monotonic union with no notion of which round it belonged to, and
+// scorch is cleared at the block rollover on each client's own 20s pollChain plus a 7s podium. So
+// for up to ~27s one client is on the new block with a clean board while another still holds a
+// full mask — and any fresh peer publishing in that window made the lagging client broadcast its
+// stale mask, re-scorching craters the first client had just cleared AND zeroing whatever land had
+// been claimed on the new board, because applyScorchedRle clears owner too.
+function sendScorched(){ if (!mode.rampart || !started || !net.ready) return; let any = false; for (let i = 0; i < scorched.length; i++) if (scorched[i]){ any = true; break; } if (!any) return; pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'scorched', h: chain.height, rle: rleScorched() }) })); }
 
 // ---------- netcode ----------
 // Ticks carry only their room tag. They also used to carry ['h', block height], which nothing
@@ -931,7 +941,10 @@ function subscribe(){
           if (Number.isInteger(c.i)){ if (c.i >= 0 && c.i < MAX_BOTS && !iDrive() && e.pubkey === droneAuthority()){ const d = players.get(dronePk(c.i)); spawnBolt(dronePk(c.i), c.x, c.y, c.d & 3, d ? d.hue : 200); } }
           else spawnBolt(e.pubkey, c.x, c.y, c.d & 3, p.hue); }
         else if (c.t === 'boom' && mode.rampart && typeof c.x === 'number' && typeof c.y === 'number' && c.x >= 0 && c.x < COLS && c.y >= 0 && c.y < ROWS){ boom(c.x, c.y, false); }
-        else if (c.t === 'scorched' && mode.rampart && typeof c.rle === 'string' && c.rle.length < 30000){ applyScorchedRle(c.rle); }
+        // Rejecting is the safe direction: a crater we skip is re-sent by the next join, whereas a
+        // resurrected one silently deletes real territory. A receiver that has not yet seen the new
+        // tip also rejects a NEWER keyframe, which self-corrects on its next poll.
+        else if (c.t === 'scorched' && mode.rampart && c.h === chain.height && typeof c.rle === 'string' && c.rle.length < 30000){ applyScorchedRle(c.rle); }
         else if (c.t === 'dland' && typeof c.rle === 'string' && c.rle.length < 30000){
           if (!iDrive() && e.pubkey === droneAuthority()){ const i = c.i | 0; if (i >= 0 && i < MAX_BOTS) applyRle(adoptDrone(i).slot, c.rle); } }
         else if (c.t === 'kill'){
