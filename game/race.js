@@ -584,7 +584,14 @@ function onRampartPhase(key, prev){
     for (const d of drones) d.bombAt = 0;
   } else if (key === 'build'){
     for (const p of players.values()) p.cannons = [];
-    shells.length = 0;
+    // Shells in flight are deliberately NOT dropped here. Wiping them meant a shot fired inside
+    // the last SHELL_MS of bombard was destroyed mid-arc: no crater, no 'boom' on the wire, and
+    // the cannon still marked fired — the shot simply vanished, and that window is exactly when
+    // riders panic-tap their last shots. Worse, only the firer publishes the boom, so whether the
+    // crater existed at all depended on whose clock crossed the edge first: a fast client dropped
+    // its own shell and published nothing, a slow one landed it and everyone scorched.
+    // They land where they were aimed and scorch as build begins. The board is cleared properly
+    // at the block rollover, which is where shells are actually reset.
     camPan.x = camPan.y = 0; panKeys.clear();
     if (started && prev) feed('build — claim while you can', 'claim');
   }
