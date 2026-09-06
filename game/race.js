@@ -64,7 +64,24 @@ const RAMPART_PHASES = [
 const RAMPART_PERIOD = RAMPART_PHASES.reduce((s, p) => s + p.secs, 0);
 // A cannon per ~2% of the grid held at fortify, capped; the blast is a small disk of scorched
 // earth that clears its owner and can never be re-claimed until the block resets the board.
-const CANNON_PER_CELLS = 250, MAX_CANNONS = 12, BLAST_R = 3.2, SHELL_MS = 620;
+// Cannon allotment. The old rule was one per 250 cells capped at 12, which meant the cap bound at
+// 2875 cells — 22.8% of a 140x90 grid — and a rider holding a quarter of the board had exactly the
+// same firepower as one holding all of it. Past 23%, conquest bought nothing.
+//
+// It is now a sub-linear curve over the whole range, so expansion always pays and never runs away:
+//
+//     land    % grid   cannons   (drones at DRONE_CANNON_SCALE)
+//        0      0.0%      0        0     <- no land, no gun; the old Math.max(1,...) handed out
+//      250      2.0%      1        1        one that had nowhere legal to stand
+//     1000      7.9%      3        2
+//     2875     22.8%      6        4
+//     6300     50.0%     10        7
+//    12600    100.0%     16       11
+//
+// MAX_CANNONS is bounded by the FORTIFY phase, not by balance: at 18 seconds and roughly a tap a
+// second, ~16 is the most a rider can physically place. Raising it means lengthening the phase.
+// The two dials are MAX_CANNONS and CANNON_CURVE; nothing else needs touching to retune this.
+const MAX_CANNONS = 16, CANNON_CURVE = .65, DRONE_CANNON_SCALE = .7, BLAST_R = 3.2, SHELL_MS = 620;
 // The current phase is a pure function of the wall clock: floor the epoch seconds into the
 // repeating period and walk the table. `left` is seconds remaining in this phase.
 function rampartPhase(){
@@ -474,10 +491,17 @@ function stepShells(dt){
     const e = s.t; s.x = s.sx + (s.tx - s.sx) * e; s.y = s.sy + (s.ty - s.sy) * e - Math.sin(e * Math.PI) * 3;
   }
 }
-// A rider or drone gets cannons scaled to the land it holds at the moment fortify begins.
-const cannonsFor = land => Math.max(1, Math.min(MAX_CANNONS, Math.round(land / CANNON_PER_CELLS)));
+// A rider or drone gets cannons scaled to the land it holds at the moment fortify begins. One
+// function for both, with the drone handicap as an explicit multiplier — it used to be a second,
+// undocumented curve (one per 375 cells, capped at 6), so "cannons scale with territory" quietly
+// meant two different things depending on who you were.
+function cannonsFor(land, scale = 1){
+  if (!(land > 0)) return 0;
+  const ceiling = Math.max(1, Math.round(MAX_CANNONS * scale));
+  return Math.max(1, Math.min(ceiling, Math.round(ceiling * Math.pow(land / (COLS * ROWS), CANNON_CURVE))));
+}
 function placeDroneCannons(d){
-  const allowed = Math.max(1, Math.min(6, Math.round((d.land || 0) / (CANNON_PER_CELLS * 1.5))));
+  const allowed = cannonsFor(d.land || 0, DRONE_CANNON_SCALE);
   d.cannons = [];
   // Legal 2x2 anchors only, and re-checked each time so two drone cannons cannot overlap.
   for (let k = 0; k < allowed; k++){

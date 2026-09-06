@@ -50,20 +50,63 @@ test('the phase clock partitions its period with no gap or overlap', () => {
   assert.equal(at(3), at(3 + PERIOD), 'the cycle does not repeat across the period boundary');
 });
 
-// --- cannon allotment scales with territory, clamped ---
-test('cannons are granted in proportion to land held, at least one and capped', () => {
-  const src = race.match(/const cannonsFor = [^;]+;/)?.[0];
+// --- cannon allotment scales with territory over the WHOLE range ---
+// This block previously asserted `cannonsFor(0) === 1` and a linear one-per-CANNON_PER_CELLS
+// rule. Both were the behaviour being fixed: the floor handed a cannon to a rider with no land to
+// stand it on, and the linear rule hit MAX_CANNONS at 22.8% of the grid, so a quarter of the board
+// and the whole board granted identical firepower. The contract is now a sub-linear curve.
+const N_CELLS = COLS * ROWS;
+const allot = () => {
+  const src = race.match(/function cannonsFor\([\s\S]*?\n\}/)?.[0];
   assert.ok(src, 'cannonsFor is missing from game/race.js');
-  const PER = Number(race.match(/CANNON_PER_CELLS = (\d+)/)?.[1]);
   const MAX = Number(race.match(/MAX_CANNONS = (\d+)/)?.[1]);
-  assert.ok(PER > 0 && MAX > 0, 'CANNON_PER_CELLS / MAX_CANNONS missing');
-  const cannonsFor = new Function('CANNON_PER_CELLS', 'MAX_CANNONS', `${src}; return cannonsFor;`)(PER, MAX);
-  assert.equal(cannonsFor(0), 1, 'a rider with no land still gets one cannon');
-  assert.equal(cannonsFor(PER), 1, 'one unit of land is one cannon');
-  assert.equal(cannonsFor(PER * 4), 4, 'four units of land is four cannons');
-  assert.equal(cannonsFor(PER * MAX * 10), MAX, 'a huge territory is capped at MAX_CANNONS');
-  // strictly non-decreasing in land
-  let prev = 0; for (let land = 0; land < PER * (MAX + 2); land += 37){ const c = cannonsFor(land); assert.ok(c >= prev, 'cannon count went down as land grew'); prev = c; }
+  const CURVE = Number(race.match(/CANNON_CURVE = ([\d.]+)/)?.[1]);
+  assert.ok(MAX > 0 && CURVE > 0, 'MAX_CANNONS / CANNON_CURVE missing');
+  return { MAX, CURVE, fn: new Function('MAX_CANNONS', 'CANNON_CURVE', 'COLS', 'ROWS', `${src}; return cannonsFor;`)(MAX, CURVE, COLS, ROWS) };
+};
+
+test('no land means no cannon', () => {
+  const { fn } = allot();
+  for (const land of [0, -1, -100, NaN, undefined, null]) assert.equal(fn(land), 0, `${land} land should grant no cannon`);
+  assert.equal(fn(1), 1, 'any land at all grants at least one');
+});
+
+test('the allotment never decreases as territory grows', () => {
+  const { fn } = allot();
+  let prev = -1;
+  for (let land = 0; land <= N_CELLS; land += 13){ const c = fn(land); assert.ok(c >= prev, `${land} cells granted ${c}, fewer than the ${prev} before it`); prev = c; }
+});
+
+test('the cap is reached at the whole board, not at a quarter of it', () => {
+  const { fn, MAX } = allot();
+  assert.equal(fn(N_CELLS), MAX, 'owning everything should grant MAX_CANNONS');
+  // The regression this exists to catch: the old curve was already maxed at 2875 cells.
+  assert.ok(fn(2875) < MAX, `22.8% of the grid still grants the maximum (${fn(2875)}/${MAX}) — the cap binds too early`);
+  assert.ok(fn(N_CELLS / 2) < fn(N_CELLS), 'half the board and the whole board grant the same — expansion stops paying');
+  assert.ok(fn(N_CELLS / 4) < fn(N_CELLS / 2), 'a quarter and a half grant the same');
+});
+
+test('the allotment stays inside the phase budget', () => {
+  // FORTIFY is a fixed number of seconds and every cannon costs a tap. An allotment nobody can
+  // physically place is a balance change disguised as a number.
+  const { fn, MAX } = allot();
+  const fortify = PHASES.find(p => p.key === 'fortify');
+  assert.ok(fortify, 'no fortify phase');
+  assert.ok(MAX <= fortify.secs, `MAX_CANNONS ${MAX} exceeds the ${fortify.secs}s fortify phase at one tap a second`);
+  for (let land = 0; land <= N_CELLS; land += 97) assert.ok(fn(land) <= MAX, `${land} cells granted more than MAX_CANNONS`);
+});
+
+test('drones run the same curve, handicapped by an explicit multiplier', () => {
+  const { fn, MAX } = allot();
+  const scale = Number(race.match(/DRONE_CANNON_SCALE = ([\d.]+)/)?.[1]);
+  assert.ok(scale > 0 && scale < 1, 'DRONE_CANNON_SCALE missing or not a handicap');
+  for (let land = 200; land <= N_CELLS; land += 311)
+    assert.ok(fn(land, scale) <= fn(land), `at ${land} cells a drone out-guns a rider`);
+  assert.equal(fn(N_CELLS, scale), Math.round(MAX * scale), 'a drone owning everything should get its scaled ceiling');
+  // and the drone path must actually use it, rather than keeping a second private curve
+  const drone = race.match(/function placeDroneCannons[\s\S]*?\n\}/)?.[0];
+  assert.ok(drone, 'placeDroneCannons is missing');
+  assert.match(drone, /cannonsFor\([^)]*DRONE_CANNON_SCALE\)/, 'drones still compute their own allotment');
 });
 
 // --- scorchDisk: the blast footprint ---
