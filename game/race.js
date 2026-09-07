@@ -385,7 +385,10 @@ function stepBolts(dt){
 // event when its shell lands, and every client (the firer included) applies that same boom, so the
 // scorched cells and the ownership they clear are identical everywhere without a second authority.
 const shells = [];
-let cannonsAllowed = 0, rampPhaseKey = '';
+// cannonsAllowed is the number of NEW cannons this round grants, and cannonsKept is how many
+// survivors were already standing when it was granted. The placement cap is their SUM: what you
+// held is not spent on what you are owed. See onRampartPhase('fortify').
+let cannonsAllowed = 0, cannonsKept = 0, rampPhaseKey = '';
 // Set at the build edge, cleared by rampartTick once no shell is still in the air. See sweepSevered.
 let severPending = false;
 // Tactical camera. The rider is frozen during fortify and bombard, and the camera is otherwise
@@ -542,12 +545,12 @@ function cannonsFor(land, scale = 1){
 }
 function placeDroneCannons(d){
   const allowed = cannonsFor(d.land || 0, DRONE_CANNON_SCALE);
-  // Survivors hold their slots, exactly as a rider's do, and the top-up only fills what is left
-  // of the allotment. A drone that keeps its ground therefore keeps its guns, and one that has
-  // been shelled flat rebuilds from nothing — the same bargain the riders are playing under.
+  // Survivors are extra, exactly as a rider's are: the grant is added on top of whatever came
+  // through the bombardment rather than being spent on it. A drone that keeps its ground keeps its
+  // guns AND gets its new ones — the same bargain the riders are playing under.
   d.cannons = keepCannons(d);
   // Legal 2x2 anchors only, and re-checked each time so two drone cannons cannot overlap.
-  for (let k = d.cannons.length; k < allowed; k++){
+  for (let k = 0; k < allowed; k++){
     const open = cannonAnchors(d);
     if (!open.length) break;
     const cell = open[Math.floor(Math.random() * open.length)];
@@ -586,9 +589,9 @@ function rampartTap(cell){
     // anchor corner.
     const at = cannonAt(local.cannons, cell);
     if (at >= 0){ local.cannons.splice(at, 1); return; }
-    // At the cap. Survivors count against the allotment, so a rider who held their ground can be
-    // full before placing anything this round — say how to free a slot rather than just refusing.
-    if (local.cannons.length >= cannonsAllowed){ feed(`only ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'} this round — tap one to pick it up`, 'kill'); return; }
+    // At the cap. The cap is survivors PLUS this round's grant, so holding your ground never costs
+    // you the cannons you are owed — you have simply placed everything you were given this round.
+    if (local.cannons.length >= cannonsKept + cannonsAllowed){ feed(`that is all ${cannonsAllowed} new cannon${cannonsAllowed === 1 ? '' : 's'} this round — tap one to pick it up and re-site it`, 'kill'); return; }
     // Anchor the block so the tapped cell is inside it where that is legal: tapping the middle of
     // your land should place, not bounce because the block happened to extend the wrong way.
     const anchor = [cell, cell - 1, cell - COLS, cell - COLS - 1]
@@ -703,20 +706,27 @@ function onRampartPhase(key, prev){
   }
   if (key === 'fortify'){
     landCounts();
-    // Survivors are kept and they COUNT AGAINST the allotment rather than stacking on top of it,
-    // so "cannons scale with the land you hold" is still true after ten rounds of carry-over
-    // instead of drifting into an unbounded pile. The reward for surviving is that those slots
-    // arrive already placed, aimed and paid for — not that you get extra guns.
+    // The grant is what your land earns you THIS round, and survivors are extra. Charging survivors
+    // against the grant — which is what shipped first — meant that defending your emplacements
+    // successfully was punished: a rider who kept four cannons alive walked into fortify already
+    // full and placed nothing, while a rider who had been shelled flat got four fresh ones. Holding
+    // ground is the whole point of the mode, so it cannot be the thing that costs you your turn.
+    //
+    // The total is therefore unbounded by MAX_CANNONS across rounds. What bounds it in practice is
+    // the board: every cannon needs its own non-overlapping 2x2 of your own unscorched land, so the
+    // ceiling is your territory, and BOMBARD is 18 seconds at roughly a tap a second, so guns past
+    // ~18 cannot all be fired in a round anyway.
     cannonsAllowed = cannonsFor(local.land); local.cannons = keepCannons(local);
+    cannonsKept = local.cannons.length;
     if (started && local.alive){
-      // A cannon now needs a 2x2 of your own land. A thin or shattered holding can have plenty of
+      // A cannon needs a 2x2 of your own land. A thin or shattered holding can have plenty of
       // cells and nowhere legal to stand, so say so instead of bouncing every tap.
       const room = cannonAnchors(local).length;
-      const kept = local.cannons.length, more = Math.min(Math.max(0, cannonsAllowed - kept), room);
-      const held = `${kept} cannon${kept === 1 ? '' : 's'} still standing`;
-      if (more && kept) feed(`fortify — ${held} · place up to ${more} more`, 'claim me');
+      const more = Math.min(cannonsAllowed, room);
+      const held = `${cannonsKept} cannon${cannonsKept === 1 ? '' : 's'} still standing`;
+      if (more && cannonsKept) feed(`fortify — ${held} · place ${more} more`, 'claim me');
       else if (more) feed(`fortify — place up to ${more} cannon${more === 1 ? '' : 's'}`, 'claim me');
-      else if (kept) feed(`fortify — ${held}, no room for more`, 'claim me');
+      else if (cannonsKept) feed(`fortify — ${held}, no room to add any`, 'claim me');
       else feed('no room for a cannon — you need 2x2 of unscorched land', 'kill');
     }
     if (iDrive()) for (const d of drones) placeDroneCannons(d);
@@ -1183,7 +1193,7 @@ function setMode(name, opts = {}){
   if (combat === mode.combat && rampart === mode.rampart){ syncModeUI(); return; }
   mode.combat = combat; mode.rampart = rampart;
   localStorage.setItem('br_mode', rampart ? 'rampart' : combat ? 'combat' : 'classic');
-  bolts.length = 0; shells.length = 0; local.fireCd = 0; local.cannons = []; scorched.fill(0); rampPhaseKey = ''; severPending = false;
+  bolts.length = 0; shells.length = 0; local.fireCd = 0; local.cannons = []; scorched.fill(0); rampPhaseKey = ''; severPending = false; cannonsKept = 0;
   for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); }
   subscribe(); syncModeUI(); syncRoomUI();
   if (started && !opts.quiet){ feed(rampart ? 'rampart grid — build, fortify, bombard' : combat ? 'combat grid — F or the FIRE button shoots' : 'classic grid'); sendLand(true); startBeacon(); }
@@ -1214,7 +1224,7 @@ async function roundOver(prevHeight){
   if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b', mode: mode.rampart ? 'rampart' : mode.combat ? 'combat' : 'classic' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
   // A fresh block wipes the board — scorched earth included. Rampart craters are a within-round
   // constraint, not a permanent scar that would grind every grid down to nothing over time.
-  setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); scorched.fill(0); shells.length = 0; rampPhaseKey = ''; severPending = false; for (const p of players.values()){ p.kills = 0; p.deaths = 0; p.cannons = []; if (p === local ? started : true) spawn(p); } }, 7000);
+  setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); scorched.fill(0); shells.length = 0; rampPhaseKey = ''; severPending = false; cannonsKept = 0; for (const p of players.values()){ p.kills = 0; p.deaths = 0; p.cannons = []; if (p === local ? started : true) spawn(p); } }, 7000);
 }
 async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]);
     // Some early events carry a unix timestamp where the height belongs; a BLAKE2b height is
@@ -1398,7 +1408,10 @@ function renderRampart(){
   const el = $('rampBanner'); if (!el) return;
   if (!mode.rampart || !started){ el.classList.add('hidden'); return; }
   const ph = rampartPhase(); el.classList.remove('hidden'); el.className = 'rampb ' + ph.key;
-  const extra = ph.key === 'fortify' ? ` · ${local.cannons.length}/${cannonsAllowed} placed`
+  // Count NEW placements against the grant, and show the survivors separately — with survivors
+  // free, `cannons.length/cannonsAllowed` would read as "6/4 placed" the moment you carried any.
+  const extra = ph.key === 'fortify'
+    ? ` · ${Math.max(0, local.cannons.length - cannonsKept)}/${cannonsAllowed} placed${cannonsKept ? ` · ${cannonsKept} standing` : ''}`
     : ph.key === 'bombard' ? ` · ${local.cannons.filter(c => !c.fired).length} cannon${local.cannons.filter(c => !c.fired).length === 1 ? '' : 's'} left` : '';
   el.innerHTML = `<b>${ph.label}</b> <span class="rt">${ph.left}s</span>${extra}<small>${ph.hint}</small>`;
 }
@@ -1472,6 +1485,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, baseAlive, severedCells, reanchorBase, wipeSevered, sweepSevered, CANNON_W, CANNON_H, readServerClock, syncedNow, get clockSkew(){ return clockSkew; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, baseAlive, severedCells, reanchorBase, wipeSevered, sweepSevered, CANNON_W, CANNON_H, readServerClock, syncedNow, get clockSkew(){ return clockSkew; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get cannonsKept(){ return cannonsKept; }, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
