@@ -80,9 +80,13 @@ const rleScorchedSrc = oneLiner('rleScorched');
 
 function board() {
   const owner = new Uint8Array(N), scorched = new Uint8Array(N);
-  const api = new Function('owner', 'scorched', 'COLS', 'ROWS',
-    `${applySrc}\n${rleScorchedSrc}\n return { applyScorchedRle, rleScorched };`)(owner, scorched, COLS, ROWS);
-  return { owner, scorched, ...api };
+  // pruneCannons is injected because applyScorchedRle now calls it: a keyframed crater destroys
+  // the cannon standing on it, the same as one arriving by 'boom'. This rig has no cannons, so
+  // counting the calls is all it needs to know.
+  let pruned = 0;
+  const api = new Function('owner', 'scorched', 'COLS', 'ROWS', 'pruneCannons',
+    `${applySrc}\n${rleScorchedSrc}\n return { applyScorchedRle, rleScorched };`)(owner, scorched, COLS, ROWS, () => pruned++);
+  return { owner, scorched, pruned: () => pruned, ...api };
 }
 
 test('replaying a stale mask onto a fresh board is exactly the damage described', () => {

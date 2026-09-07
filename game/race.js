@@ -337,7 +337,10 @@ function capture(p){
   }
 }
 function die(p, by, why, verb){
-  if (!p.alive) return; p.alive = false; p.deaths++; p.diedAt = now(); clearLand(p.slot); p.tail = []; p.tailSet = new Set();
+  // Cannons go with the land. Being wiped out clears every cell you held, so anything you had
+  // emplaced is standing on ground that is no longer yours — and now that cannons outlive their
+  // round, leaving them in the list would draw a dead rider's guns until the next fortify.
+  if (!p.alive) return; p.alive = false; p.deaths++; p.diedAt = now(); clearLand(p.slot); p.cannons = []; p.tail = []; p.tailSet = new Set();
   killFx(p, p === local || by === me.sessPub);
   const killer = by && players.get(by); if (killer && killer !== p) killer.kills++;
   const who = label(p); const kn = killer ? label(killer) : null;
@@ -467,6 +470,21 @@ function pruneCannons(){
     p.cannons = p.cannons.filter(c => { const cs = cannonCells(c.cell); return cs && !cs.some(i => scorched[i]); });
   }
 }
+// The cannons a player carries into the next round. An emplacement that came through the
+// bombardment intact is still standing, so it is kept rather than handed back in and re-placed
+// from scratch: surviving the shelling is the reward. It has to still be a legal emplacement to
+// survive — a crater under any of the four cells already took it out at boom(), and ground that
+// changed hands takes its cannon with it, so a rival who overruns your position captures it
+// rather than fighting a gun on their own land.
+//
+// `fired` is cleared so a survivor shoots again, and the aim is refreshed because whatever it was
+// pointed at last round may be a crater now. The objects are rebuilt rather than mutated so a
+// caller can compare the two lists.
+function keepCannons(p){
+  return (p.cannons || [])
+    .filter(c => { const cs = cannonCells(c.cell); return cs && cs.every(i => !scorched[i] && owner[i] === p.slot); })
+    .map(c => ({ ...c, fired: false, aim: cannonAim(p, c.cell) }));
+}
 // The blast footprint: a disk of radius BLAST_R around (cx,cy). Owner is cleared and the cell is
 // marked unbuildable. Split out from the fx so it can be tested without a canvas.
 function scorchDisk(cx, cy){
@@ -520,9 +538,12 @@ function cannonsFor(land, scale = 1){
 }
 function placeDroneCannons(d){
   const allowed = cannonsFor(d.land || 0, DRONE_CANNON_SCALE);
-  d.cannons = [];
+  // Survivors hold their slots, exactly as a rider's do, and the top-up only fills what is left
+  // of the allotment. A drone that keeps its ground therefore keeps its guns, and one that has
+  // been shelled flat rebuilds from nothing — the same bargain the riders are playing under.
+  d.cannons = keepCannons(d);
   // Legal 2x2 anchors only, and re-checked each time so two drone cannons cannot overlap.
-  for (let k = 0; k < allowed; k++){
+  for (let k = d.cannons.length; k < allowed; k++){
     const open = cannonAnchors(d);
     if (!open.length) break;
     const cell = open[Math.floor(Math.random() * open.length)];
@@ -561,7 +582,9 @@ function rampartTap(cell){
     // anchor corner.
     const at = cannonAt(local.cannons, cell);
     if (at >= 0){ local.cannons.splice(at, 1); return; }
-    if (local.cannons.length >= cannonsAllowed){ feed(`only ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'} this round`, 'kill'); return; }
+    // At the cap. Survivors count against the allotment, so a rider who held their ground can be
+    // full before placing anything this round — say how to free a slot rather than just refusing.
+    if (local.cannons.length >= cannonsAllowed){ feed(`only ${cannonsAllowed} cannon${cannonsAllowed === 1 ? '' : 's'} this round — tap one to pick it up`, 'kill'); return; }
     // Anchor the block so the tapped cell is inside it where that is legal: tapping the middle of
     // your land should place, not bounce because the block happened to extend the wrong way.
     const anchor = [cell, cell - 1, cell - COLS, cell - COLS - 1]
@@ -588,20 +611,33 @@ function onRampartPhase(key, prev){
   }
   if (key === 'fortify'){
     landCounts();
-    cannonsAllowed = cannonsFor(local.land); local.cannons = [];
+    // Survivors are kept and they COUNT AGAINST the allotment rather than stacking on top of it,
+    // so "cannons scale with the land you hold" is still true after ten rounds of carry-over
+    // instead of drifting into an unbounded pile. The reward for surviving is that those slots
+    // arrive already placed, aimed and paid for — not that you get extra guns.
+    cannonsAllowed = cannonsFor(local.land); local.cannons = keepCannons(local);
     if (started && local.alive){
       // A cannon now needs a 2x2 of your own land. A thin or shattered holding can have plenty of
       // cells and nowhere legal to stand, so say so instead of bouncing every tap.
       const room = cannonAnchors(local).length;
-      if (!room) feed('no room for a cannon — you need 2x2 of unscorched land', 'kill');
-      else feed(`fortify — place up to ${Math.min(cannonsAllowed, room)} cannon${Math.min(cannonsAllowed, room) === 1 ? '' : 's'}`, 'claim me');
+      const kept = local.cannons.length, more = Math.min(Math.max(0, cannonsAllowed - kept), room);
+      const held = `${kept} cannon${kept === 1 ? '' : 's'} still standing`;
+      if (more && kept) feed(`fortify — ${held} · place up to ${more} more`, 'claim me');
+      else if (more) feed(`fortify — place up to ${more} cannon${more === 1 ? '' : 's'}`, 'claim me');
+      else if (kept) feed(`fortify — ${held}, no room for more`, 'claim me');
+      else feed('no room for a cannon — you need 2x2 of unscorched land', 'kill');
     }
     if (iDrive()) for (const d of drones) placeDroneCannons(d);
   } else if (key === 'bombard'){
     if (started && local.alive) feed('bombard — tap enemy land to shell it', 'kill me');
     for (const d of drones) d.bombAt = 0;
   } else if (key === 'build'){
-    for (const p of players.values()) p.cannons = [];
+    // Cannons are deliberately NOT scrapped here any more. They used to be handed back in at every
+    // build edge, so a gun that survived a bombardment was demolished by the calendar rather than
+    // by anyone shooting at it, and the emplacement you spent FORTIFY siting was worth nothing the
+    // moment the phase turned over. Now they stand: a cannon leaves the board when a crater takes
+    // it (boom -> pruneCannons), when the ground under it changes hands, or when the block resets.
+    // They are re-armed and re-aimed at the next fortify by keepCannons.
     // Shells in flight are deliberately NOT dropped here. Wiping them meant a shot fired inside
     // the last SHELL_MS of bombard was destroyed mid-arc: no crater, no 'boom' on the wire, and
     // the cannon still marked fired — the shot simply vanished, and that window is exactly when
@@ -825,7 +861,11 @@ function sendLand(force){ if (!started || !net.ready) return; if (!force && now(
 // ever SETS craters and clears their owner, never un-scorches, so it is safe to receive out of
 // order and idempotent to receive twice.
 function rleScorched(){ const runs = []; let cur = 0, n = 0; for (let i = 0; i < scorched.length; i++){ const v = scorched[i] ? 1 : 0; if (v === cur) n++; else { runs.push(n); cur = v; n = 1; } } runs.push(n); return runs.join(','); }
-function applyScorchedRle(str){ let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < scorched.length; k++){ scorched[i + k] = 1; owner[i + k] = 0; } i += n; v ^= 1; } }
+// Craters arriving by keyframe destroy cannons exactly as craters arriving by 'boom' do. It only
+// started to matter once cannons outlived their round: before that the board was empty of guns
+// for the whole build phase and the next fortify rebuilt from scratch, so a cannon left standing
+// on keyframed scorch was invisible. Now it would be drawn, and aimable, until fortify swept it.
+function applyScorchedRle(str){ let i = 0, v = 0; for (const part of str.split(',')){ const n = Number(part) | 0; if (v) for (let k = 0; k < n && i + k < scorched.length; k++){ scorched[i + k] = 1; owner[i + k] = 0; } i += n; v ^= 1; } pruneCannons(); }
 // The scorched keyframe, sent so a rider joining mid-round reconstructs craters instead of
 // reclaiming land everyone else treats as dead. It carries the block height it describes, and the
 // receiver drops anything that is not about the round it is currently playing.

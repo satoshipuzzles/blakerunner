@@ -187,7 +187,8 @@ test('the scorched keyframe round-trips and only ever sets craters', () => {
   const rle = new Function('scorched', `${rleSrc}; return rleScorched;`)(src)();
   // apply onto a board fully owned by slot 4 with no craters yet
   const dstScorched = new Uint8Array(COLS * ROWS), dstOwner = new Uint8Array(COLS * ROWS).fill(4);
-  const applyScorchedRle = new Function('scorched', 'owner', `${applySrc}; return applyScorchedRle;`)(dstScorched, dstOwner);
+  // applyScorchedRle prunes cannons off the craters it lands; there are none on this board.
+  const applyScorchedRle = new Function('scorched', 'owner', 'pruneCannons', `${applySrc}; return applyScorchedRle;`)(dstScorched, dstOwner, () => {});
   applyScorchedRle(rle);
   const set = new Set(craters);
   for (let i = 0; i < dstScorched.length; i++){
