@@ -209,12 +209,14 @@ const scorched = new Uint8Array(COLS * ROWS);
 const slots = [null]; const slotOf = new Map();
 function slot(pk){ if (slotOf.has(pk)) return slotOf.get(pk); const s = slots.length; slots.push(pk); slotOf.set(pk, s); return s; }
 const players = new Map(); let started = false;
-function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, fireCd: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0, cannons: [] }; players.set(pk, p); return p; }
+function mkPlayer(pk, drone = false){ const p = { pk, slot: slot(pk), drone, x: 0, y: 0, d: 0, nd: 0, cell: -1, tail: [], tailSet: new Set(), alive: false, kills: 0, deaths: 0, land: 0, last: now(), cd: 0, boostUntil: 0, fireCd: 0, diedAt: 0, netX: 0, netY: 0, netAt: 0, hue: parseInt(pk.slice(0, 4), 16) % 360, pat: 0, cannons: [], base: [] }; players.set(pk, p); return p; }
 function clearLand(s){ for (let i = 0; i < owner.length; i++) if (owner[i] === s) owner[i] = 0; }
+// The cells claimed at spawn are remembered as the player's BASE. In rampart that is what the rest
+// of a holding has to stay joined to — see severedCells(). Everywhere else it is inert.
 function spawn(p){
-  clearLand(p.slot); p.tail = []; p.tailSet = new Set(); p.alive = true; p.boostUntil = 0;
+  clearLand(p.slot); p.tail = []; p.tailSet = new Set(); p.alive = true; p.boostUntil = 0; p.base = [];
   for (let tries = 0; tries < 300; tries++){ const cx = 5 + Math.floor(Math.random() * (COLS - 10)), cy = 5 + Math.floor(Math.random() * (ROWS - 10)); let free = true; for (let y = -4; y <= 4 && free; y++) for (let x = -4; x <= 4; x++){ const j = idx(cx + x, cy + y); if (owner[j] || scorched[j]){ free = false; break; } }
-    if (free || tries === 299){ for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++){ const j = idx(cx + x, cy + y); if (!scorched[j]) owner[j] = p.slot; } p.x = cx + .5; p.y = cy + .5; p.cell = idx(cx, cy); p.d = p.nd = Math.floor(Math.random() * 4); p.inside = true; return; } }
+    if (free || tries === 299){ for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++){ const j = idx(cx + x, cy + y); if (!scorched[j]){ owner[j] = p.slot; p.base.push(j); } } p.x = cx + .5; p.y = cy + .5; p.cell = idx(cx, cy); p.d = p.nd = Math.floor(Math.random() * 4); p.inside = true; return; } }
 }
 const local = mkPlayer(me.sessPub); local.hue = style.hue; local.pat = style.pat;
 let drones = [];
@@ -384,6 +386,8 @@ function stepBolts(dt){
 // scorched cells and the ownership they clear are identical everywhere without a second authority.
 const shells = [];
 let cannonsAllowed = 0, rampPhaseKey = '';
+// Set at the build edge, cleared by rampartTick once no shell is still in the air. See sweepSevered.
+let severPending = false;
 // Tactical camera. The rider is frozen during fortify and bombard, and the camera is otherwise
 // welded to it, so on a phone only ~10% of the grid was ever reachable: you could not aim at a
 // rival whose land was off-screen. camPan is a world-pixel offset added to the camera's target
@@ -598,6 +602,94 @@ function rampartTap(cell){
     launchShell(local, cell % COLS, (cell - cell % COLS) / COLS);
   }
 }
+// ---------- rampart: land has to stay joined to your base ----------
+// Bombardment cuts territory off as much as it destroys it. A single line of craters strung across
+// a neck leaves a fat pocket of your colour that nothing is holding, and it used to keep counting
+// for full score until the block reset — the safest place to own land was as far from your base as
+// possible. Now the severed part falls: after the shelling settles, anything you own that is no
+// longer reachable from your base is cleared.
+//
+// 4-connected, the same adjacency capture() floods with, so a holding joined only at a corner is
+// not "touching" under one rule and touching under the other.
+const baseAlive = p => (p.base || []).some(c => owner[c] === p.slot);
+// Every cell this player owns that cannot be walked to from a surviving base cell.
+function severedCells(p){
+  const seen = new Uint8Array(COLS * ROWS), q = [];
+  for (const c of p.base || []) if (owner[c] === p.slot && !seen[c]){ seen[c] = 1; q.push(c); }
+  while (q.length){
+    const i = q.pop(), cx = i % COLS, cy = (i - cx) / COLS;
+    if (cx > 0){ const j = i - 1; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; q.push(j); } }
+    if (cx < COLS - 1){ const j = i + 1; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; q.push(j); } }
+    if (cy > 0){ const j = i - COLS; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; q.push(j); } }
+    if (cy < ROWS - 1){ const j = i + COLS; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; q.push(j); } }
+  }
+  const out = [];
+  for (let i = 0; i < owner.length; i++) if (owner[i] === p.slot && !seen[i]) out.push(i);
+  return out;
+}
+// The base itself can be shelled flat or overrun, and BLAST_R covers a whole 3x3 — so reading a
+// dead base as "everything you own is severed" would let one lucky tap delete an entire empire.
+// Instead the base falls back to the middle of the largest piece you still hold and the rest of
+// your holding falls. You lose everything you could not keep joined up, and the flag moves to
+// where your army actually is, but no single shell wipes you out.
+//
+// DESIGN CALL, easy to reverse: delete this function and the baseAlive branch in wipeSevered and
+// a destroyed base takes the whole holding with it, which is the harsher reading of the rule.
+function reanchorBase(p){
+  const seen = new Uint8Array(COLS * ROWS);
+  let best = null;
+  for (let s = 0; s < owner.length; s++){
+    if (owner[s] !== p.slot || seen[s]) continue;
+    const comp = [s]; seen[s] = 1;
+    for (let k = 0; k < comp.length; k++){
+      const i = comp[k], cx = i % COLS, cy = (i - cx) / COLS;
+      if (cx > 0){ const j = i - 1; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; comp.push(j); } }
+      if (cx < COLS - 1){ const j = i + 1; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; comp.push(j); } }
+      if (cy > 0){ const j = i - COLS; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; comp.push(j); } }
+      if (cy < ROWS - 1){ const j = i + COLS; if (!seen[j] && owner[j] === p.slot){ seen[j] = 1; comp.push(j); } }
+    }
+    if (!best || comp.length > best.length) best = comp;
+  }
+  p.base = [];
+  if (!best) return;
+  // Centre of that piece, then the cell of it actually nearest that centre — a centroid can easily
+  // land in a hole, and a base cell that is not owned is a base cell that is already dead.
+  let sx = 0, sy = 0;
+  for (const c of best){ sx += c % COLS; sy += (c - c % COLS) / COLS; }
+  sx /= best.length; sy /= best.length;
+  let hub = best[0], bd = Infinity;
+  for (const c of best){ const dx = c % COLS - sx, dy = (c - c % COLS) / COLS - sy, d = dx * dx + dy * dy; if (d < bd){ bd = d; hub = c; } }
+  const hx = hub % COLS, hy = (hub - hx) / COLS;
+  for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++){
+    const ax = hx + x, ay = hy + y; if (ax < 0 || ay < 0 || ax >= COLS || ay >= ROWS) continue;
+    const j = idx(ax, ay); if (owner[j] === p.slot) p.base.push(j);
+  }
+}
+// Clear this player's cut-off land. Returns the number of cells lost so the caller can report it.
+function wipeSevered(p){
+  if (!baseAlive(p)) reanchorBase(p);
+  const cut = severedCells(p);
+  for (const c of cut) owner[c] = 0;
+  return cut.length;
+}
+// The sweep, run once the sky is clear. Only for riders whose land THIS client is the authority
+// for: a rider's own client republishes its territory wholesale with sendLand, and the flock
+// driver does the same for the drones, so a watcher recomputing this would only be racing the
+// keyframe that is about to overwrite it anyway.
+function sweepSevered(){
+  if (!mode.rampart || !started) return;
+  for (const p of players.values()){
+    if (!p.alive || !(p === local || (p.drone && iDrive()))) continue;
+    const lost = wipeSevered(p);
+    if (!lost) continue;
+    if (p === local){
+      feed(`${lost} cell${lost === 1 ? '' : 's'} cut off from your base fell`, 'kill me');
+      sendLand(true);
+    } else if (net.ready){
+      pub(signAsSess({ kind: K_EVT, tags: [['t', roomTag()]], content: JSON.stringify({ t: 'dland', i: p.i, rle: rleMine(p.slot) }) }));
+    }
+  }
+}
 // Phase edges: bank open tails so nobody freezes mid-run, hand out cannons, and clear the tactical
 // state when build comes back around. Scorched earth is deliberately not cleared here — it lasts
 // until the block resets the board.
@@ -647,13 +739,20 @@ function onRampartPhase(key, prev){
     // They land where they were aimed and scorch as build begins. The board is cleared properly
     // at the block rollover, which is where shells are actually reset.
     camPan.x = camPan.y = 0; panKeys.clear();
+    // Arm the severance sweep rather than running it here. Shells fired in the last SHELL_MS of
+    // bombard deliberately outlive the phase edge and land during build, and those late craters are
+    // exactly the ones that cut a neck — sweeping at the edge itself would score the board one
+    // moment before the shots that changed it. rampartTick runs it once nothing is in the air.
+    severPending = true;
     if (started && prev) feed('build — claim while you can', 'claim');
   }
 }
 function rampartTick(){
-  if (!mode.rampart){ rampPhaseKey = ''; return; }
+  if (!mode.rampart){ rampPhaseKey = ''; severPending = false; return; }
   const key = rampartPhase().key;
   if (key !== rampPhaseKey){ const prev = rampPhaseKey; rampPhaseKey = key; onRampartPhase(key, prev); }
+  // Armed at the build edge, fired when the last shell has landed and its crater is on the board.
+  if (severPending && !shells.length){ severPending = false; sweepSevered(); }
   droneBombard();
 }
 function enterCell(p, c){
@@ -1084,7 +1183,7 @@ function setMode(name, opts = {}){
   if (combat === mode.combat && rampart === mode.rampart){ syncModeUI(); return; }
   mode.combat = combat; mode.rampart = rampart;
   localStorage.setItem('br_mode', rampart ? 'rampart' : combat ? 'combat' : 'classic');
-  bolts.length = 0; shells.length = 0; local.fireCd = 0; local.cannons = []; scorched.fill(0); rampPhaseKey = '';
+  bolts.length = 0; shells.length = 0; local.fireCd = 0; local.cannons = []; scorched.fill(0); rampPhaseKey = ''; severPending = false;
   for (const p of [...players.values()]) if (p !== local && !p.drone){ clearLand(p.slot); players.delete(p.pk); }
   subscribe(); syncModeUI(); syncRoomUI();
   if (started && !opts.quiet){ feed(rampart ? 'rampart grid — build, fortify, bombard' : combat ? 'combat grid — F or the FIRE button shoots' : 'classic grid'); sendLand(true); startBeacon(); }
@@ -1115,7 +1214,7 @@ async function roundOver(prevHeight){
   if (started && me.id){ try { const ev = await signAsMe({ kind: K_SCORE, tags: [['t', TAG], ['t', `${TAG}-${prevHeight}`], ['d', String(prevHeight)], ['client', 'blakerunner']], content: JSON.stringify({ height: prevHeight, land: local.land, cells: COLS * ROWS, kills: local.kills, deaths: local.deaths, chain: 'blake2b', mode: mode.rampart ? 'rampart' : mode.combat ? 'combat' : 'classic' }) }); await Promise.any(pool.publish(SCORE_RELAYS, ev)); $('podNote').textContent = 'Your result is signed by your npub and on the relays.'; } catch (e) { $('podNote').textContent = 'Could not publish your score: ' + e.message; } }
   // A fresh block wipes the board — scorched earth included. Rampart craters are a within-round
   // constraint, not a permanent scar that would grind every grid down to nothing over time.
-  setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); scorched.fill(0); shells.length = 0; rampPhaseKey = ''; for (const p of players.values()){ p.kills = 0; p.deaths = 0; p.cannons = []; if (p === local ? started : true) spawn(p); } }, 7000);
+  setTimeout(() => { $('podium').classList.add('hidden'); owner.fill(0); scorched.fill(0); shells.length = 0; rampPhaseKey = ''; severPending = false; for (const p of players.values()){ p.kills = 0; p.deaths = 0; p.cannons = []; if (p === local ? started : true) spawn(p); } }, 7000);
 }
 async function fetchScores(limit = 500){ const evs = await pool.querySync(SCORE_RELAYS, { kinds: [K_SCORE], '#t': [TAG], limit }, { maxWait: 4000 }).catch(() => []); const rows = []; const seen = new Set(); for (const e of evs){ const h = Number(e.tags.find(t => t[0] === 'd')?.[1]);
     // Some early events carry a unix timestamp where the height belongs; a BLAKE2b height is
@@ -1373,6 +1472,6 @@ $('styleClose').onclick = () => $('styleBox').classList.add('hidden');
 $('hud').addEventListener('click', e => { const pk = e.target.closest('[data-pk]')?.dataset.pk; if (!pk) return; const href = npubLink(pk); if (href) window.open(href, '_blank'); });
 bindStyle('hueIn', 'patterns'); bindStyle('hueIn2', 'patterns2'); syncStyleUI();
 if ('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs => { for (const r of rs) if (!(r.active || r.installing || r.waiting)?.scriptURL.endsWith('/sw-game.js')) r.unregister(); }).catch(() => {}); navigator.serviceWorker.register('/sw-game.js', { scope: '/game' }).catch(() => {}); }
-window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, CANNON_W, CANNON_H, readServerClock, syncedNow, get clockSkew(){ return clockSkew; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
+window.hodland = { local, players, owner, scorched, shells, steer, boost, celebrateWinner, COLS, ROWS, style, room, setRoom, setBots, setMode, inviteUrl, bolts, fire: () => fire(local), rampartPhase, launchShell, boom, rampartTap, cellAt, CELL, camPan, get camZoom(){ return camZoom; }, get cam(){ return { x: cam.x, y: cam.y }; }, cannonCells, cannonAt, cannonBlocked, cannonAnchors, pruneCannons, baseAlive, severedCells, reanchorBase, wipeSevered, sweepSevered, CANNON_W, CANNON_H, readServerClock, syncedNow, get clockSkew(){ return clockSkew; }, get combat(){ return mode.combat; }, get rampart(){ return mode.rampart; }, get cannons(){ return local.cannons; }, get cannonsAllowed(){ return cannonsAllowed; }, get bots(){ return botsWanted; } };
 syncRoomUI(); syncBotsUI(); syncModeUI(); pollChain(); setInterval(pollChain, 20000); subscribe(); lastPodium(); ensureDrones(); renderLive(); liveT = setInterval(renderLive, 15000); loop();
 if (params.get('room')) feed(`invited to grid “${room.name}”`);
