@@ -109,58 +109,88 @@ const fortifyBody = (() => {
   return after.slice(0, after.indexOf('\n  }'));
 })();
 
-// Run the fortify edge for a rider holding `land` cells with `had` cannons already emplaced.
+// Run the fortify edge for a rider holding `land` cells with cannons already emplaced. Both
+// counters come back out, because the placement cap is now their SUM and a test that only reads
+// the grant cannot tell the two rules apart.
 function fortify(w, local, land) {
   const feeds = [];
-  let cannonsAllowed = 0;
+  let out = { cannonsAllowed: 0, cannonsKept: 0 };
   const run = new Function('local', 'landCounts', 'cannonsFor', 'keepCannons', 'cannonAnchors',
-    'feed', 'started', 'iDrive', 'drones', 'placeDroneCannons', 'setAllowed', 'Math',
-    `let cannonsAllowed = 0;\n${fortifyBody}\nsetAllowed(cannonsAllowed);`);
+    'feed', 'started', 'iDrive', 'drones', 'placeDroneCannons', 'report', 'Math',
+    `let cannonsAllowed = 0, cannonsKept = 0;\n${fortifyBody}\nreport(cannonsAllowed, cannonsKept);`);
   run(local, () => { local.land = land; }, w.cannonsFor, w.keepCannons, w.cannonAnchors,
-    (msg, cls) => feeds.push(msg), true, () => false, [], () => {}, v => { cannonsAllowed = v; }, Math);
-  return { cannonsAllowed, feeds };
+    (msg, cls) => feeds.push(msg), true, () => false, [], () => {},
+    (a, k) => { out = { cannonsAllowed: a, cannonsKept: k }; }, Math);
+  return { ...out, feeds, cap: out.cannonsAllowed + out.cannonsKept };
 }
 
-test('survivors are charged against the allotment, not stacked on top of it', () => {
+test('survivors are EXTRA: the grant is added on top, not spent on them', () => {
+  // This reverses the rule the carry-over first shipped with. Charging survivors against the grant
+  // punished the thing the mode is about: a rider who successfully defended four cannons walked
+  // into fortify already full and placed nothing, while a rider who had been shelled flat got four
+  // fresh ones. cloudfodder's call, 2026-09-07: you always get to place what your land earns you.
   const w = world();
   const land = 3000;
   w.give(1, 5, 5, land);
-  const allowed = w.cannonsFor(land);
-  assert.ok(allowed >= 3, `this test needs an allotment of at least 3, got ${allowed} — retune it`);
+  const grant = w.cannonsFor(land);
+  assert.ok(grant >= 3, `this test needs a grant of at least 3, got ${grant} — retune it`);
 
-  // Two survivors going in.
   const local = { slot: 1, alive: true, land, cannons: [
     { cell: idx(5, 5), fired: true, aim: 0 }, { cell: idx(7, 5), fired: true, aim: 0 } ] };
-  const { cannonsAllowed } = fortify(w, local, land);
+  const { cannonsAllowed, cannonsKept, cap } = fortify(w, local, land);
 
-  assert.equal(cannonsAllowed, allowed, 'the allotment itself must still be cannonsFor(land)');
+  assert.equal(cannonsAllowed, grant, 'the grant itself must still be cannonsFor(land)');
+  assert.equal(cannonsKept, 2, 'both survivors should have been counted as kept');
   assert.equal(local.cannons.length, 2, 'both survivors should have come through the edge');
   assert.ok(local.cannons.every(c => !c.fired), 'survivors were not re-armed');
-  // The cap rampartTap enforces is `local.cannons.length >= cannonsAllowed`, so what is placeable
-  // this round is the difference. Without charging survivors it would be the whole allotment.
-  assert.equal(Math.max(0, cannonsAllowed - local.cannons.length), allowed - 2,
-    'survivors are not consuming their slots — the pile would grow every round');
+  // The cap rampartTap enforces is `cannons.length >= cannonsKept + cannonsAllowed`. What is
+  // placeable is therefore the WHOLE grant regardless of how many survived.
+  assert.equal(cap - local.cannons.length, grant,
+    'survivors are eating the grant — holding your ground must not cost you your new cannons');
 });
 
-test('the allotment is a ceiling: carry-over cannot exceed what MAX_CANNONS allows', () => {
+test('the placeable count does not shrink as more cannons survive', () => {
+  // The property that actually matters, swept rather than spot-checked: for a fixed holding, the
+  // number of NEW cannons you may place is the same whether you carried nothing or a full pile.
   const w = world();
-  // Hold the whole board and carry a full complement round after round.
+  const land = 3000;
+  w.give(1, 5, 5, land);
+  const grant = w.cannonsFor(land);
+  let placeable = null;
+  for (let survivors = 0; survivors <= 5; survivors++) {
+    const cannons = [];
+    for (let k = 0; k < survivors; k++) cannons.push({ cell: idx(5 + 3 * k, 5), fired: true, aim: 0 });
+    const local = { slot: 1, alive: true, land, cannons };
+    const { cap } = fortify(w, local, land);
+    const canPlace = cap - local.cannons.length;
+    if (placeable === null) placeable = canPlace;
+    assert.equal(canPlace, placeable, `carrying ${survivors} survivors changed the new-cannon count`);
+    assert.equal(canPlace, grant, `carrying ${survivors} survivors did not grant the full ${grant}`);
+  }
+});
+
+test('the pile grows across rounds — MAX_CANNONS bounds the grant, not the total', () => {
+  // The deliberate consequence of the rule above, pinned so nobody "fixes" it back by accident.
+  // What bounds the total in practice is the board (every cannon needs its own 2x2 of your own
+  // land) and the 18s bombard phase, not MAX_CANNONS.
+  const w = world();
   w.owner.fill(1);
   const land = N;
   const local = { slot: 1, alive: true, land, cannons: [] };
-  for (let round = 0; round < 12; round++) {
-    const { cannonsAllowed } = fortify(w, local, land);
-    // Fill every free slot, the way a rider tapping through fortify would.
-    let guard = 0;
-    while (local.cannons.length < cannonsAllowed && guard++ < 100) {
-      const open = w.cannonAnchors(local);
-      if (!open.length) break;
-      local.cannons.push({ cell: open[0], fired: false, aim: 0 });
+  const counts = [];
+  for (let round = 0; round < 4; round++) {
+    const { cap } = fortify(w, local, land);
+    // Place at pre-spaced non-overlapping anchors rather than re-scanning cannonAnchors (which is
+    // O(grid) per placement and made this test 7s on its own). Anchor legality is covered above;
+    // what is under test here is the cap arithmetic.
+    while (local.cannons.length < cap) {
+      const n = local.cannons.length;
+      local.cannons.push({ cell: idx(4 + 3 * (n % 40), 4 + 3 * Math.floor(n / 40)), fired: false, aim: 0 });
     }
-    assert.ok(local.cannons.length <= MAX_CANNONS,
-      `round ${round}: ${local.cannons.length} cannons — carry-over broke the MAX_CANNONS ceiling`);
+    counts.push(local.cannons.length);
   }
-  assert.equal(local.cannons.length, w.cannonsFor(land), 'a full board should settle at the full allotment');
+  assert.deepEqual(counts, [MAX_CANNONS, MAX_CANNONS * 2, MAX_CANNONS * 3, MAX_CANNONS * 4],
+    `a rider holding the whole board and losing nothing should gain a full grant every round: ${counts}`);
 });
 
 test('losing your land loses the cannons on it, allotment or not', () => {
@@ -197,7 +227,7 @@ test('the build edge no longer scraps cannons, and the pre-fix source still fail
 
 // ---------- drones play by the same rules ----------
 
-test('drones keep their survivors and only top up the remainder', () => {
+test('drones get their grant on top of their survivors too', () => {
   const body = src('placeDroneCannons');
   const w = world();
   const land = 4000;
@@ -207,9 +237,9 @@ test('drones keep their survivors and only top up the remainder', () => {
     `${body}; return placeDroneCannons;`)(d, w.cannonsFor, DRONE_CANNON_SCALE, w.keepCannons, w.cannonAnchors,
     () => 0, Math);
   place(d);
-  const allowed = w.cannonsFor(land, DRONE_CANNON_SCALE);
+  const grant = w.cannonsFor(land, DRONE_CANNON_SCALE);
   assert.ok(d.cannons.some(c => c.cell === idx(40, 40)), 'the drone threw away a cannon that survived');
-  assert.equal(d.cannons.length, allowed, `drone should hold exactly its allotment (${allowed})`);
+  assert.equal(d.cannons.length, grant + 1, `drone should hold its 1 survivor plus a full grant of ${grant}`);
 });
 
 // ---------- craters from a keyframe destroy cannons too ----------
